@@ -18,8 +18,12 @@ def get_YFin_data_online(
     # Create ticker object
     ticker = yf.Ticker(symbol.upper())
 
-    # Fetch historical data for the specified date range
-    data = yf_retry(lambda: ticker.history(start=start_date, end=end_date))
+    # yfinance's history(end=...) is END-EXCLUSIVE: passing end='2026-05-08'
+    # returns data only up to 2026-05-07. We treat end_date as inclusive
+    # (what users actually mean), so push the yfinance argument forward by 1 day.
+    from datetime import timedelta
+    end_date_yf = (datetime.strptime(end_date, "%Y-%m-%d") + timedelta(days=1)).strftime("%Y-%m-%d")
+    data = yf_retry(lambda: ticker.history(start=start_date, end=end_date_yf))
 
     # Check if data is empty
     if data.empty:

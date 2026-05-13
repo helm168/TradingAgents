@@ -8,9 +8,15 @@ load_dotenv()
 
 # Create a custom config
 config = DEFAULT_CONFIG.copy()
-config["deep_think_llm"] = "gpt-5.4-mini"  # Use a different model
-config["quick_think_llm"] = "gpt-5.4-mini"  # Use a different model
+# config["deep_think_llm"] = "gpt-5.4-mini"  # Use a different model
+# config["quick_think_llm"] = "gpt-5.4-mini"  # Use a different model
 config["max_debate_rounds"] = 1  # Increase debate rounds
+
+config["llm_provider"] = "deepseek"
+config["backend_url"] = "https://api.deepseek.com"
+config["deep_think_llm"] = "deepseek-reasoner"   # 深度推理（辩论/裁判）
+config["quick_think_llm"] = "deepseek-chat"      # 快速任务（分析师/风险辩论）
+config["output_language"] = "Chinese"  
 
 # Configure data vendors (default uses yfinance, no extra API keys needed)
 config["data_vendors"] = {

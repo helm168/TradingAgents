@@ -45,12 +45,28 @@ def _clean_dataframe(data: pd.DataFrame) -> pd.DataFrame:
     return data
 
 
+def _pick_ohlcv_vendor(symbol: str) -> str:
+    """根据 ticker 后缀决定走哪个 vendor 拉 OHLC。
+
+    .HK / .SS / .SH / .SZ 走 efinance（东方财富对中港股最稳）
+    其余（美股等）走 yfinance
+    """
+    s = symbol.strip().upper()
+    if s.endswith(".HK") or s.endswith(".SS") or s.endswith(".SH") or s.endswith(".SZ"):
+        return "efinance"
+    return "yfinance"
+
+
 def load_ohlcv(symbol: str, curr_date: str) -> pd.DataFrame:
     """Fetch OHLCV data with caching, filtered to prevent look-ahead bias.
 
-    Downloads 15 years of data up to today and caches per symbol. On
+    Downloads 5 years of data up to today and caches per symbol. On
     subsequent calls the cache is reused. Rows after curr_date are
     filtered out so backtests never see future prices.
+
+    Vendor is auto-selected by ticker suffix: HK/A-share use efinance,
+    everything else uses yfinance. Cache filenames carry the vendor tag
+    so switching vendors doesn't return stale data.
     """
     # Reject ticker values that would escape the cache directory when
     # interpolated into the cache filename (e.g. ``../../tmp/x``).
@@ -59,20 +75,36 @@ def load_ohlcv(symbol: str, curr_date: str) -> pd.DataFrame:
     config = get_config()
     curr_date_dt = pd.to_datetime(curr_date)
 
-    # Cache uses a fixed window (15y to today) so one file per symbol
+    # Cache uses a fixed window (5y to today) so one file per symbol+vendor
     today_date = pd.Timestamp.today()
     start_date = today_date - pd.DateOffset(years=5)
     start_str = start_date.strftime("%Y-%m-%d")
-    end_str = today_date.strftime("%Y-%m-%d")
+    end_str = (today_date + pd.Timedelta(days=1)).strftime("%Y-%m-%d")
+
+    vendor = _pick_ohlcv_vendor(symbol)
 
     os.makedirs(config["data_cache_dir"], exist_ok=True)
     data_file = os.path.join(
         config["data_cache_dir"],
-        f"{safe_symbol}-YFin-data-{start_str}-{end_str}.csv",
+        f"{safe_symbol}-{vendor}-data-{start_str}-{end_str}.csv",
     )
 
     if os.path.exists(data_file):
         data = pd.read_csv(data_file, on_bad_lines="skip", encoding="utf-8")
+    elif vendor == "efinance":
+        # 用 efinance 拉，标准化成 yfinance 风格的 columns
+        from .efinance_stock import _fetch_ohlcv_df
+        df = _fetch_ohlcv_df(symbol, start_str, today_date.strftime("%Y-%m-%d"))
+        if df is None or len(df) == 0:
+            logger.warning(f"efinance returned no data for {symbol}, falling back to yfinance")
+            data = yf_retry(lambda: yf.download(
+                symbol, start=start_str, end=end_str,
+                multi_level_index=False, progress=False, auto_adjust=True,
+            ))
+            data = data.reset_index()
+        else:
+            data = df.reset_index()  # Date is index in _fetch_ohlcv_df
+        data.to_csv(data_file, index=False, encoding="utf-8")
     else:
         data = yf_retry(lambda: yf.download(
             symbol,
