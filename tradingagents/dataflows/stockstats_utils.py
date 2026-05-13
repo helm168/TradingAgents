@@ -48,10 +48,26 @@ def _clean_dataframe(data: pd.DataFrame) -> pd.DataFrame:
 def _pick_ohlcv_vendor(symbol: str) -> str:
     """根据 ticker 后缀决定走哪个 vendor 拉 OHLC。
 
-    .HK / .SS / .SH / .SZ 走 efinance（东方财富对中港股最稳）
-    其余（美股等）走 yfinance
+    优先级:
+        local_parquet (有 sh_quant 本地数据 + 该 ticker 命中) > efinance/yfinance
+
+    中港股 (.HK / .SS / .SH / .SZ) 远程走 efinance
+    其余 (美股) 远程走 yfinance
     """
     s = symbol.strip().upper()
+
+    # 优先看 local_parquet 是否有这只 ticker 的 parquet
+    try:
+        from .local_parquet_stock import (
+            is_available as _lp_available,
+            normalize_ts_code as _lp_normalize,
+            _stock_path as _lp_stock_path,
+        )
+        if _lp_available() and _lp_stock_path(_lp_normalize(s)).exists():
+            return "local_parquet"
+    except ImportError:
+        pass
+
     if s.endswith(".HK") or s.endswith(".SS") or s.endswith(".SH") or s.endswith(".SZ"):
         return "efinance"
     return "yfinance"
@@ -91,6 +107,33 @@ def load_ohlcv(symbol: str, curr_date: str) -> pd.DataFrame:
 
     if os.path.exists(data_file):
         data = pd.read_csv(data_file, on_bad_lines="skip", encoding="utf-8")
+    elif vendor == "local_parquet":
+        # 直读 sh_quant data_cache/stocks/<ts>.parquet (后复权 close × adj_factor)
+        from .local_parquet_stock import _read_ohlc, normalize_ts_code
+        ts_code = normalize_ts_code(symbol)
+        df = _read_ohlc(ts_code, start_str, today_date.strftime("%Y-%m-%d"))
+        if df is None or len(df) == 0:
+            logger.warning(
+                f"local_parquet has no data for {symbol} ({ts_code}), falling back to yfinance"
+            )
+            data = yf_retry(lambda: yf.download(
+                symbol, start=start_str, end=end_str,
+                multi_level_index=False, progress=False, auto_adjust=True,
+            ))
+            data = data.reset_index()
+        else:
+            # 对齐 yfinance 列名: trade_date→Date, open→Open, ...
+            data = df.rename(columns={
+                "trade_date": "Date",
+                "open": "Open",
+                "high": "High",
+                "low": "Low",
+                "close": "Close",
+                "vol": "Volume",
+            })
+            cols = [c for c in ["Date", "Open", "High", "Low", "Close", "Volume"] if c in data.columns]
+            data = data[cols]
+        data.to_csv(data_file, index=False, encoding="utf-8")
     elif vendor == "efinance":
         # 用 efinance 拉，标准化成 yfinance 风格的 columns
         from .efinance_stock import _fetch_ohlcv_df

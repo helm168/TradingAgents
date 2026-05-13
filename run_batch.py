@@ -41,6 +41,7 @@ from dotenv import load_dotenv
 from tradingagents.default_config import DEFAULT_CONFIG
 from tradingagents.graph.trading_graph import TradingAgentsGraph
 from tradingagents.scoring import score_reports
+from tradingagents.exporters import export_to_billionaire, AGENT_REPORTS_DIR
 
 load_dotenv()
 
@@ -222,6 +223,25 @@ def main():
             except Exception as e:
                 print(f"  评分失败: {e}")
                 err = err or f"scoring: {e}"
+
+        # 3) 导出到 Billionaire 能消费的 JSON (~/.market_data/agent_reports/<ts_code>.json)
+        if report_dir and report_dir.exists():
+            try:
+                exported_path = export_to_billionaire(
+                    ticker=ticker,
+                    report_dir=report_dir,
+                    analysis_date=analysis_date,
+                    score_dict=score_dict if score_dict else None,
+                    decision_text=decision_str,
+                    model_config={
+                        "quick": config.get("quick_think_llm"),
+                        "deep": config.get("deep_think_llm"),
+                    },
+                )
+                print(f"  ✓ Billionaire 导出: {exported_path}")
+            except Exception as e:
+                print(f"  ! Billionaire 导出失败 (不影响主流程): {e}")
+                err = err or f"export: {e}"
 
         # 3) 汇总行
         elapsed = (datetime.now() - t0).total_seconds()

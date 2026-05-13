@@ -55,6 +55,21 @@ except ImportError:
     POLYGON_AVAILABLE = False
     PolygonRateLimitError = None
 
+# local_parquet vendor: sh_quant data_cache 本地读, 跟 Billionaire 数据底座一致.
+# 只在 ~/.market_data/stocks/ 存在时才注册——不依赖该路径的部署不受影响.
+try:
+    from .local_parquet_stock import (
+        get_local_parquet_data,
+        get_local_parquet_fundamentals,
+        get_local_parquet_balance_sheet,
+        get_local_parquet_income_statement,
+        get_local_parquet_cashflow,
+        is_available as _local_parquet_is_available,
+    )
+    LOCAL_PARQUET_AVAILABLE = _local_parquet_is_available()
+except ImportError:
+    LOCAL_PARQUET_AVAILABLE = False
+
 # Configuration and routing logic
 from .config import get_config
 
@@ -95,6 +110,7 @@ VENDOR_LIST = (
     ["yfinance", "alpha_vantage"]
     + (["efinance"] if EFINANCE_AVAILABLE else [])
     + (["polygon"] if POLYGON_AVAILABLE else [])
+    + (["local_parquet"] if LOCAL_PARQUET_AVAILABLE else [])
 )
 
 # Mapping of methods to their vendor-specific implementations
@@ -105,16 +121,18 @@ VENDOR_METHODS = {
         "yfinance": get_YFin_data_online,
         **({"efinance": get_efinance_data_online} if EFINANCE_AVAILABLE else {}),
         **({"polygon": get_polygon_stock_data} if POLYGON_AVAILABLE else {}),
+        **({"local_parquet": get_local_parquet_data} if LOCAL_PARQUET_AVAILABLE else {}),
     },
     # technical_indicators
     "get_indicators": {
         "alpha_vantage": get_alpha_vantage_indicator,
         "yfinance": get_stock_stats_indicators_window,
-        # efinance/polygon 没有独立的 indicator 接口，技术指标统一由 stockstats 在 OHLC 上算，
-        # stockstats_utils.load_ohlcv 已经按 ticker 自动选 vendor。
+        # efinance/polygon/local_parquet 没有独立的 indicator 接口，技术指标统一由 stockstats
+        # 在 OHLC 上算; stockstats_utils.load_ohlcv 已经按 ticker 自动选 vendor。
         # 这里复用 yfinance 的 wrapper，底层会自动切 vendor。
         **({"efinance": get_stock_stats_indicators_window} if EFINANCE_AVAILABLE else {}),
         **({"polygon": get_stock_stats_indicators_window} if POLYGON_AVAILABLE else {}),
+        **({"local_parquet": get_stock_stats_indicators_window} if LOCAL_PARQUET_AVAILABLE else {}),
     },
     # fundamental_data
     "get_fundamentals": {
@@ -122,24 +140,28 @@ VENDOR_METHODS = {
         "yfinance": get_yfinance_fundamentals,
         **({"efinance": get_efinance_fundamentals} if EFINANCE_AVAILABLE else {}),
         **({"polygon": get_polygon_fundamentals} if POLYGON_AVAILABLE else {}),
+        **({"local_parquet": get_local_parquet_fundamentals} if LOCAL_PARQUET_AVAILABLE else {}),
     },
     "get_balance_sheet": {
         "alpha_vantage": get_alpha_vantage_balance_sheet,
         "yfinance": get_yfinance_balance_sheet,
         **({"efinance": get_efinance_balance_sheet} if EFINANCE_AVAILABLE else {}),
         **({"polygon": get_polygon_balance_sheet} if POLYGON_AVAILABLE else {}),
+        **({"local_parquet": get_local_parquet_balance_sheet} if LOCAL_PARQUET_AVAILABLE else {}),
     },
     "get_cashflow": {
         "alpha_vantage": get_alpha_vantage_cashflow,
         "yfinance": get_yfinance_cashflow,
         **({"efinance": get_efinance_cashflow} if EFINANCE_AVAILABLE else {}),
         **({"polygon": get_polygon_cashflow} if POLYGON_AVAILABLE else {}),
+        **({"local_parquet": get_local_parquet_cashflow} if LOCAL_PARQUET_AVAILABLE else {}),
     },
     "get_income_statement": {
         "alpha_vantage": get_alpha_vantage_income_statement,
         "yfinance": get_yfinance_income_statement,
         **({"efinance": get_efinance_income_statement} if EFINANCE_AVAILABLE else {}),
         **({"polygon": get_polygon_income_statement} if POLYGON_AVAILABLE else {}),
+        **({"local_parquet": get_local_parquet_income_statement} if LOCAL_PARQUET_AVAILABLE else {}),
     },
     # news_data
     "get_news": {
@@ -212,22 +234,32 @@ def _resolve_auto(method: str, args, kwargs) -> list:
         or ticker.endswith(".SH") or ticker.endswith(".SZ")
     )
 
+    # local_parquet 总是排第一 (如果 vendor 注册了) —— 数据已在本地, 零成本零延迟,
+    # miss 时自动 fallback 到下游远程 vendor.
+    # 新闻类 (get_news/get_global_news/get_insider_transactions) 没本地数据,
+    # local_parquet 不参与, 走原路径.
+    news_methods = {"get_news", "get_global_news", "get_insider_transactions"}
+    local_first = LOCAL_PARQUET_AVAILABLE and method not in news_methods
+
     if is_cn_hk:
-        # 中港股：efinance 主，yfinance 兜底
+        # 中港股：local_parquet → efinance → yfinance
         chain = []
+        if local_first:
+            chain.append("local_parquet")
         if EFINANCE_AVAILABLE:
             chain.append("efinance")
         chain.extend(["yfinance", "alpha_vantage"])
         return chain
 
-    # 美股
-    news_methods = {"get_news", "get_global_news"}
+    # 美股 - 新闻类 (没本地): Polygon → yfinance
     if method in news_methods and POLYGON_AVAILABLE:
-        # 新闻：Polygon 优先（覆盖广，自带 sentiment）
         return ["polygon", "yfinance", "alpha_vantage"]
 
-    # 其他方法（OHLC、指标、基本面、内幕交易）：yfinance 优先，polygon/alpha_vantage 兜底
-    chain = ["yfinance", "alpha_vantage"]
+    # 美股 OHLC/指标/基本面: local_parquet → yfinance → polygon → alpha_vantage
+    chain = []
+    if local_first:
+        chain.append("local_parquet")
+    chain.extend(["yfinance", "alpha_vantage"])
     if POLYGON_AVAILABLE:
         chain.append("polygon")
     if EFINANCE_AVAILABLE:
@@ -276,13 +308,15 @@ def route_to_vendor(method: str, *args, **kwargs):
         try:
             result = impl_func(*args, **kwargs)
             # 一些 vendor 对不支持的市场会返回明确字符串（"efinance 失败"、"Polygon 不支持"、
-            # "未实现"），这些情况也触发 fallback
+            # "未实现"、"local_parquet ... 未找到"），这些情况也触发 fallback
             if isinstance(result, str):
                 fail_markers = (
                     "efinance ", "Polygon 不支持", "Polygon ", "未实现",
+                    "local_parquet ",
                 )
                 if any(marker in result and ("失败" in result or "不支持" in result
-                                              or "未实现" in result)
+                                              or "未实现" in result or "未找到" in result
+                                              or "数据为空" in result)
                        for marker in fail_markers):
                     last_error = result
                     continue
