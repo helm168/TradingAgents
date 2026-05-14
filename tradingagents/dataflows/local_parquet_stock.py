@@ -186,6 +186,21 @@ def _read_financials(ts_code: str, n_latest: int = 8) -> Optional[pd.DataFrame]:
     return df
 
 
+def _period_label(row) -> str:
+    """生成不可误读的财季标签: 'FY2026 Q1 (截至 2025-11-27)'.
+
+    解决幻觉: 美光/NVDA/AAPL 这种 fiscal year 跟 calendar year 错位的公司,
+    直接展示 end_date.year 会让 LLM 把 2025-11-27 (实际是 FY2026 Q1) 标成
+    "2025 Q1". 显式拼 fiscal_year 前缀消除歧义.
+    """
+    period = row.get("period", "?")
+    fy = row.get("fiscal_year")
+    end_date = row["end_date"].date() if pd.notna(row.get("end_date")) else "?"
+    if pd.notna(fy):
+        return f"FY{int(fy)} {period} (截至 {end_date})"
+    return f"{end_date} ({period})"
+
+
 def _fmt_money(x) -> str:
     """raw → 易读 string (千分位 + 单位). 大额走亿/百万."""
     try:
@@ -236,7 +251,11 @@ def _latest_summary_md(ticker: str, ts_code: str, df: pd.DataFrame) -> str:
 
     lines = [
         f"# {ticker.upper()} Fundamentals (local_parquet ts_code: {ts_code})\n",
-        f"## 最新季 {latest['end_date'].date()} ({latest.get('period', '?')})",
+        # FY 前缀必须显式 — 美光/NVDA/AAPL 这种 fiscal year 错位日历年的公司,
+        # 直接展示 end_date.year 会让 LLM 把 "2025-11-27" 标成 "2025 Q1",
+        # 实际是 FY2026 Q1. 加 fiscal_year 列后 LLM 拿到 "FY2026 Q1 (截至
+        # 2025-11-27)" 这种不可误读的标签.
+        f"## 最新财季 {_period_label(latest)}",
         f"- **货币**: {latest.get('currency', '—')}",
         f"- **营业收入**: {_fmt_money(latest.get('revenue'))}",
         f"- **净利润**: {_fmt_money(latest.get('net_income'))}",
@@ -283,7 +302,7 @@ def _table_md(title: str, ticker: str, ts_code: str, df: pd.DataFrame, cols: lis
     header = ["Period"] + [label for _, label in cols]
     rows = []
     for _, r in df.iterrows():
-        period_label = f"{r['end_date'].date()} ({r.get('period', '?')})"
+        period_label = _period_label(r)
         cells = [period_label]
         for col, _ in cols:
             cells.append(_fmt_money(r.get(col)))

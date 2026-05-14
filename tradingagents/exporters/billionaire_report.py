@@ -280,7 +280,14 @@ def export_to_billionaire(
 
     out_root = out_dir or AGENT_REPORTS_DIR
     out_root.mkdir(parents=True, exist_ok=True)
-    out_path = out_root / f"{ts_code}.json"
+
+    # 文件名带 model 后缀让"同一只股票, 不同模型"的报告独立存放, 用户可以
+    # 在 UI 上切换对比. model_id 取 deep_think_llm (主推理模型, 是 verdict 来源);
+    # 没传 model_config 就 fallback 到 'unknown' (老 export 兼容).
+    # 文件名安全: model 里的 '/' 替成 '-' 防 path traversal.
+    deep_model = (model_config or {}).get("deep") or "unknown"
+    safe_model = deep_model.replace("/", "-").replace("\\", "-")
+    out_path = out_root / f"{ts_code}.{safe_model}.json"
     out_path.write_text(
         json.dumps(payload, ensure_ascii=False, indent=2),
         encoding="utf-8",
