@@ -66,17 +66,23 @@ def _input_to_messages(input_: Any) -> list:
 
 
 class DeepSeekChatOpenAI(NormalizedChatOpenAI):
-    """DeepSeek-specific overrides on top of the OpenAI-compatible client.
+    """Reasoning-thinking-model overrides on top of the OpenAI-compatible client.
 
-    Thinking-mode round-trip is the only DeepSeek-specific behavior that
-    stays here. When DeepSeek's thinking models return a response with
-    ``reasoning_content``, that field must be echoed back as part of the
-    assistant message on the next turn or the API fails with HTTP 400.
-    ``_create_chat_result`` captures it on receive and
-    ``_get_request_payload`` re-attaches it on send.
+    Despite the historical name 'DeepSeek', this subclass is actually a
+    **generic OpenAI-compatible reasoning-model client** — multiple providers
+    share the same "thinking mode" contract that requires reasoning_content
+    roundtrip on multi-turn conversations. Currently shared by:
 
-    Tool-choice handling for V4 and reasoner — those models reject the
-    ``tool_choice`` parameter — is handled by the capability dispatch in
+      - DeepSeek (reasoner / v4 / chat)  — first provider that needed it, hence the name
+      - 小米 MiMo (v2.5-pro / v2.5)     — same 400 'reasoning_content must be passed back' error
+
+    When the upstream model returns a response with ``reasoning_content``,
+    that field must be echoed back as part of the assistant message on the
+    next turn or the API fails with HTTP 400. ``_create_chat_result``
+    captures it on receive and ``_get_request_payload`` re-attaches it on send.
+
+    Tool-choice handling for thinking models — those reject the
+    ``tool_choice`` parameter — is via the capability dispatch in
     ``NormalizedChatOpenAI.with_structured_output``, not here.
     """
 
@@ -150,6 +156,7 @@ _PROVIDER_BASE_URL = {
     "glm-cn":     "https://open.bigmodel.cn/api/paas/v4/",
     "minimax":    "https://api.minimax.io/v1",
     "minimax-cn": "https://api.minimaxi.com/v1",
+    "xiaomi":     "https://token-plan-cn.xiaomimimo.com/v1",
     "openrouter": "https://openrouter.ai/api/v1",
     "ollama":     "http://localhost:11434/v1",
 }
@@ -228,7 +235,11 @@ class OpenAIClient(BaseLLMClient):
 
         # Provider-specific quirks live in their own subclasses so the
         # base NormalizedChatOpenAI stays free of provider branches.
-        if self.provider == "deepseek":
+        # DeepSeekChatOpenAI 其实是通用 "OpenAI-兼容 reasoning thinking" client,
+        # 处理 reasoning_content roundtrip (上一轮的 thinking 链回传, 否则 400
+        # "reasoning_content in the thinking mode must be passed back to the API").
+        # 小米 MiMo-V2.5-Pro 是 reasoning 模型, 同样要求 roundtrip, 共用这个 subclass.
+        if self.provider in ("deepseek", "xiaomi"):
             chat_cls = DeepSeekChatOpenAI
         elif self.provider in ("minimax", "minimax-cn"):
             chat_cls = MinimaxChatOpenAI
