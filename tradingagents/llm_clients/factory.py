@@ -8,6 +8,7 @@ _OPENAI_COMPATIBLE = (
     "qwen", "qwen-cn",
     "glm", "glm-cn",
     "minimax", "minimax-cn",
+    "xiaomi",  # 小米 MiMo (token-plan-cn.xiaomimimo.com)
     "ollama", "openrouter",
 )
 

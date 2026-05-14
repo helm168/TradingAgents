@@ -99,6 +99,11 @@ _BY_ID: dict[str, ModelCapabilities] = {
     "MiniMax-M2.1": _MINIMAX_THINKING,
     "MiniMax-M2.1-highspeed": _MINIMAX_THINKING,
     "MiniMax-M2": _MINIMAX_THINKING,
+    # 小米 MiMo — v2.5-pro 是 reasoning flagship (官网示例小写 model_id),
+    # 行为按 thinking 模型对齐: 没具体文档时跟 DeepSeek-reasoner 同类安全,
+    # supports_tool_choice=False 让 fallback 不阻塞.
+    "mimo-v2.5-pro": _DEEPSEEK_THINKING,
+    "mimo-v2.5": _DEEPSEEK_THINKING,
 }
 
 # Forward-compat patterns. New ``deepseek-v5-*`` / ``deepseek-reasoner-*``

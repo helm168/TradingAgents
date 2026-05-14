@@ -42,6 +42,7 @@ from tradingagents.default_config import DEFAULT_CONFIG
 from tradingagents.graph.trading_graph import TradingAgentsGraph
 from tradingagents.scoring import score_reports
 from tradingagents.exporters import export_to_billionaire, AGENT_REPORTS_DIR
+from tradingagents.llm_presets import PRESETS, apply_preset, list_presets
 # CLI 那边的落盘函数 —— 把 propagate 返回的 final_state 写成
 # reports/<TICKER>_<TS>/{1_analysts,2_research,...,complete_report.md} 结构.
 # run_batch 之前只调 propagate 不调它, 导致 markdown 报告根本没落盘, find_latest_
@@ -60,16 +61,19 @@ DEFAULT_TICKERS = [
 ]
 
 
-def build_config():
-    """单次跑用的 LLM/流程配置。"""
+def build_config(llm_preset: str = "deepseek"):
+    """单次跑用的 LLM/流程配置.
+
+    Args:
+        llm_preset: tradingagents.llm_presets.PRESETS 里的 key
+            - "deepseek": 单只股票约 $0.05-0.15, reasoner+chat 分档
+            - "xiaomi":   小米 MiMo-V2.5-Pro, token plan 月订阅
+            其它新加 provider 直接往 llm_presets.PRESETS 里塞.
+    """
     config = DEFAULT_CONFIG.copy()
 
-    # --- LLM (DeepSeek) ---
-    # 单只股票约 $0.05-0.15，比 OpenAI 便宜 10-20 倍
-    config["llm_provider"] = "deepseek"
-    config["backend_url"] = "https://api.deepseek.com"
-    config["deep_think_llm"] = "deepseek-reasoner"   # 深度推理（辩论/裁判）
-    config["quick_think_llm"] = "deepseek-chat"      # 快速任务（分析师/风险辩论/评分）
+    # --- LLM (preset 切换 4 个字段一把搞定) ---
+    apply_preset(config, llm_preset)
 
     # --- 流程 ---
     config["max_debate_rounds"] = 1
@@ -122,6 +126,10 @@ def parse_args():
     p.add_argument("--file", help="ticker 列表文件，每行一个")
     p.add_argument("--date", default=datetime.now().strftime("%Y-%m-%d"),
                    help="分析日期 YYYY-MM-DD（默认今天）")
+    p.add_argument("--llm", default="deepseek", choices=list_presets(),
+                   help=f"LLM provider preset (默认 deepseek). 切换会一并改"
+                        f"llm_provider / backend_url / deep_think_llm / "
+                        f"quick_think_llm 4 个字段, 见 tradingagents/llm_presets.py")
     p.add_argument("--no-score", action="store_true", help="跳过 LLM 评分阶段")
     p.add_argument("--score-only", action="store_true",
                    help="只对已有报告评分（不重跑 agent）")
@@ -162,13 +170,14 @@ def main():
     do_score = not args.no_score
     score_only = args.score_only
 
+    config = build_config(args.llm)
+
     print("=" * 70)
     print(f"批量分析 {len(tickers)} 只股票，分析日期 = {analysis_date}")
     print(f"标的: {', '.join(tickers)}")
     print(f"评分: {'开启' if do_score else '跳过'}")
+    print(f"LLM : {args.llm} ({config['deep_think_llm']} + {config['quick_think_llm']})")
     print("=" * 70)
-
-    config = build_config()
     ta = None if score_only else TradingAgentsGraph(debug=False, config=config)
     scoring_llm = None
     if do_score:
