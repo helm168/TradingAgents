@@ -42,6 +42,11 @@ from tradingagents.default_config import DEFAULT_CONFIG
 from tradingagents.graph.trading_graph import TradingAgentsGraph
 from tradingagents.scoring import score_reports
 from tradingagents.exporters import export_to_billionaire, AGENT_REPORTS_DIR
+# CLI 那边的落盘函数 —— 把 propagate 返回的 final_state 写成
+# reports/<TICKER>_<TS>/{1_analysts,2_research,...,complete_report.md} 结构.
+# run_batch 之前只调 propagate 不调它, 导致 markdown 报告根本没落盘, find_latest_
+# report_dir 自然找不到.
+from cli.main import save_report_to_disk
 
 load_dotenv()
 
@@ -187,13 +192,23 @@ def main():
         if not score_only:
             try:
                 start_ts = t0.timestamp()
-                _, decision = ta.propagate(ticker, analysis_date)
+                # 拿到 final_state 不要丢掉, 后面要靠它落盘 markdown.
+                final_state, decision = ta.propagate(ticker, analysis_date)
                 decision_str = str(decision)
-                report_dir = find_latest_report_dir(ticker.replace(".", "_").upper(), start_ts) \
-                              or find_latest_report_dir(ticker.upper(), start_ts)
                 print(f"  ✓ 分析完成，用时 {(datetime.now()-t0).total_seconds():.1f}s")
-                if report_dir:
+
+                # 落盘 markdown 到 reports/<TICKER>_<YYYYMMDD_HHMMSS>/, 跟 CLI 行为一致.
+                # ticker 里的 . 用 reports/ 兼容文件系统; CLI 路径已经验证过的.
+                reports_root = Path("reports")
+                reports_root.mkdir(exist_ok=True)
+                ts_stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                report_dir = reports_root / f"{ticker.upper()}_{ts_stamp}"
+                try:
+                    save_report_to_disk(final_state, ticker, report_dir)
                     print(f"  报告: {report_dir}")
+                except Exception as e:
+                    print(f"  ! 报告落盘失败 (不影响主流程): {e}")
+                    report_dir = None
             except Exception as e:
                 status = "failed"
                 err = str(e)

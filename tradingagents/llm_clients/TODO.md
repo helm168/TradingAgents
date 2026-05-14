@@ -2,8 +2,11 @@
 
 ## Issues to Fix
 
-### 1. `validate_model()` is never called
-- Add validation call in `get_llm()` with warning (not error) for unknown models
+### 1. ~~`validate_model()` is never called~~ (Fixed)
+- `BaseLLMClient.warn_if_unknown_model()` calls `validate_model()` and emits
+  `RuntimeWarning` for unknown models without raising. Each provider's
+  `get_llm()` (openai/anthropic/google/azure) calls it on the first line.
+  Covered by `tests/test_model_validation.py`.
 
 ### 2. ~~Inconsistent parameter handling~~ (Fixed)
 - GoogleClient now accepts unified `api_key` and maps it to `google_api_key`
