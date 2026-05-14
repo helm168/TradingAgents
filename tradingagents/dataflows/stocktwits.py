@@ -35,7 +35,14 @@ def fetch_stocktwits_messages(ticker: str, limit: int = 30, timeout: float = 10.
     symbol has no messages, or the response shape is unexpected — the
     caller never has to special-case None or exceptions.
     """
-    url = _API.format(ticker=ticker.upper())
+    # StockTwits 只覆盖美股 (cashtag 风格 $NVDA / $AAPL). CN / HK 股票直接 skip,
+    # 避免一次注定 404 的网络调用 + warning log 噪音. yfinance 风格后缀
+    # (.SS .SZ .HK) 是 CN/HK 唯一标识.
+    t = ticker.strip().upper()
+    if t.endswith((".SS", ".SZ", ".SH", ".BJ", ".HK")):
+        return f"<StockTwits 不覆盖 {t} (仅美股), skipped>"
+
+    url = _API.format(ticker=t)
     req = Request(url, headers={"User-Agent": _UA, "Accept": "application/json"})
     try:
         with urlopen(req, timeout=timeout) as resp:
