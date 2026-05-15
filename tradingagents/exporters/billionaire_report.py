@@ -182,20 +182,40 @@ _STRONG_RE = re.compile(r"STRONG|OVERWEIGHT|UNDERWEIGHT|强烈|加仓|增持|减
 
 
 def _extract_verdict(decision_text: str | None, portfolio_md: str) -> dict[str, Any]:
-    """从 portfolio manager decision 文本里 grep verdict.
+    """从 portfolio manager 文本里抽 verdict.
 
-    优先 decision_text (run_batch 直接拿到的最终输出), 退到 portfolio markdown.
-    Portfolio manager 实际更倾向用 Overweight / Underweight / Equal Weight
-    这套术语, 简单 BUY/HOLD/SELL 命中率低, 见 reports/NVDA_20260510_*/
+    Portfolio manager 实际写的是 Overweight / Underweight / Equal Weight 这套
+    详细术语 (见 reports/NVDA_*/5_portfolio/*.md). 但 TradingAgents 内置的
+    signal_processor.process_signal() 会把这个详细 markdown 压缩成简短
+    "Hold"/"Buy"/"Sell" 一个词, 这就是 run_batch 传给我们的 decision_text.
+
+    简短 signal 丢掉了 Overweight=BUY / Underweight=SELL 的强度信息.
+    所以两个都扫, 取较强信号:
+      - portfolio_md 命中 Underweight → SELL  (强 prefer)
+      - decision_text 命中 Hold → HOLD          (弱 fallback)
     """
-    src = decision_text or portfolio_md or ""
+    # 拼接 portfolio_md (rich) + decision_text (compressed), portfolio 优先
+    src_rich = portfolio_md or ""
+    src_compressed = decision_text or ""
+
+    # 第一轮在 rich source 上 scan, 命中就用
     action = "UNKNOWN"
+    matched_strength = False
     for pat, label in _ACTION_PATTERNS:
-        if pat.search(src):
+        if pat.search(src_rich):
             action = label
+            matched_strength = bool(_STRONG_RE.search(src_rich))
             break
 
-    if _STRONG_RE.search(src):
+    # 第二轮 fallback 到 compressed signal (没 rich 或 rich 没命中)
+    if action == "UNKNOWN":
+        for pat, label in _ACTION_PATTERNS:
+            if pat.search(src_compressed):
+                action = label
+                matched_strength = bool(_STRONG_RE.search(src_compressed))
+                break
+
+    if matched_strength:
         confidence = 0.85
     elif action != "UNKNOWN":
         confidence = 0.65
@@ -205,7 +225,7 @@ def _extract_verdict(decision_text: str | None, portfolio_md: str) -> dict[str, 
     return {
         "action": action,
         "confidence": confidence,
-        "raw": (decision_text or portfolio_md or "").strip()[:1500],
+        "raw": (src_rich or src_compressed).strip()[:1500],
     }
 
 
