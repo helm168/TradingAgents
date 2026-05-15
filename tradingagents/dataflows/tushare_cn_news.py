@@ -15,12 +15,20 @@ from __future__ import annotations
 import logging
 import os
 import re
+import time
 from datetime import datetime, timedelta
 from typing import Optional
 
 logger = logging.getLogger(__name__)
 
 _pro = None
+
+# Tushare news (VIP) 接口 5000 积分档限速 1次/分钟. sentiment_analyst +
+# news_analyst 一次 agent 跑可能多次 call get_news, 立刻触顶. 用模块级
+# cache 把"最近一次 pro.news 调用结果"保留 60s, 同一只 ticker 的二次调用
+# 直接返 cache, 避免炸限速 + 浪费 LLM 等待时间.
+_NEWS_CACHE: dict[str, tuple[float, "object"]] = {}
+_NEWS_CACHE_TTL = 70.0  # 比 60s 多留一点 buffer
 
 
 def _tushare_pro():
@@ -85,6 +93,12 @@ def fetch_anns_block(ticker: str, days_back: int = 14, limit: int = 30) -> str:
     try:
         df = pro.anns(ts_code=ts_code, start_date=start_date, end_date=end_date)
     except Exception as e:
+        # 5000 积分档 Tushare 通常没 anns 个股公告接口权限 (报"请指定正确的接口名"
+        # 或权限错误). silent skip, 不打 logger.warning, 让用户终端干净.
+        # 公告信息可以靠 AKShare 东财 (东财页面自带公告聚合) 兜底, 损失不大.
+        msg = str(e)
+        if "请指定正确的接口名" in msg or "无权限" in msg or "权限" in msg:
+            return f"<Tushare anns 接口此账号无权限 (5000 积分档限制), 已 skip>"
         logger.warning("Tushare anns failed for %s: %s", ticker, e)
         return f"<Tushare 公告拉取失败: {type(e).__name__}: {e}>"
 
@@ -123,11 +137,23 @@ def fetch_tushare_news_block(ticker: str, days_back: int = 7, limit: int = 20) -
     start_date = start_dt.strftime("%Y-%m-%d %H:%M:%S")
     end_date = end_dt.strftime("%Y-%m-%d %H:%M:%S")
 
-    try:
-        df = pro.news(src="sina", start_date=start_date, end_date=end_date)
-    except Exception as e:
-        logger.warning("Tushare news failed: %s", e)
-        return f"<Tushare 新闻流拉取失败: {type(e).__name__}: {e}>"
+    # cache 命中? 5000 积分 news 限速 1/min, 同一 agent 跑里多次 call get_news
+    # 都会撞限速浪费. 用 (src, start, end) 作 key 缓存 70s.
+    cache_key = f"sina|{start_date}|{end_date}"
+    now = time.time()
+    cached = _NEWS_CACHE.get(cache_key)
+    if cached and now - cached[0] < _NEWS_CACHE_TTL:
+        df = cached[1]  # type: ignore[assignment]
+    else:
+        try:
+            df = pro.news(src="sina", start_date=start_date, end_date=end_date)
+            _NEWS_CACHE[cache_key] = (now, df)
+        except Exception as e:
+            msg = str(e)
+            if "频率超限" in msg or "超限" in msg:
+                return f"<Tushare news 限速 (5000 积分档 1次/分钟), 已 skip>"
+            logger.warning("Tushare news failed: %s", e)
+            return f"<Tushare 新闻流拉取失败: {type(e).__name__}: {e}>"
 
     if df is None or len(df) == 0:
         return f"<Tushare 新闻流近 {days_back} 天无返回>"
