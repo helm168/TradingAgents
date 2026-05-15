@@ -48,6 +48,24 @@ PRESETS: dict[str, dict[str, Any]] = {
         "deep_think_llm": "mimo-v2.5-pro",
         "quick_think_llm": "mimo-v2.5",
     },
+    "openai": {
+        # OpenAI 官方 API — 走 deep + quick 分档套餐, 对齐 deepseek/xiaomi 约定.
+        #
+        # deep_think → gpt-5.5      (latest frontier, 1M context, debate/judge 用)
+        # quick_think → gpt-5.4-mini (fast + cheap, analysts/risk/scoring 用)
+        #
+        # 想改 model 直接编辑这两行 (推荐选项见 llm_clients/model_catalog.py
+        # 的 MODEL_OPTIONS["openai"]); 想换 endpoint (Azure / 本地 proxy)
+        # 改 backend_url.
+        #
+        # 价格参考 (2026-05): gpt-5.5 ~$10/$30 per 1M tokens (in/out),
+        # gpt-5.4-mini ~$0.30/$1.20 per 1M tokens. 单 ticker 跑下来通常
+        # $0.10-0.30, 跟 deepseek-reasoner+chat 同档.
+        "llm_provider": "openai",
+        "backend_url": "https://api.openai.com/v1",
+        "deep_think_llm": "gpt-5.5",
+        "quick_think_llm": "gpt-5.4-mini",
+    },
 }
 
 
