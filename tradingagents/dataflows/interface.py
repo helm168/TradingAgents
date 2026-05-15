@@ -70,6 +70,20 @@ try:
 except ImportError:
     LOCAL_PARQUET_AVAILABLE = False
 
+# AKShare / Tushare CN news — A 股 / 港股 news + sentiment 数据源.
+# StockTwits / Reddit / Yahoo Finance 都只覆盖美股, CN/HK sentiment 之前是空的.
+try:
+    from .akshare_cn_news import get_akshare_cn_news
+    AKSHARE_CN_AVAILABLE = True
+except ImportError:
+    AKSHARE_CN_AVAILABLE = False
+
+try:
+    from .tushare_cn_news import get_tushare_cn_news
+    TUSHARE_CN_NEWS_AVAILABLE = True
+except ImportError:
+    TUSHARE_CN_NEWS_AVAILABLE = False
+
 # Configuration and routing logic
 from .config import get_config
 
@@ -111,6 +125,8 @@ VENDOR_LIST = (
     + (["efinance"] if EFINANCE_AVAILABLE else [])
     + (["polygon"] if POLYGON_AVAILABLE else [])
     + (["local_parquet"] if LOCAL_PARQUET_AVAILABLE else [])
+    + (["tushare_cn_news"] if TUSHARE_CN_NEWS_AVAILABLE else [])
+    + (["akshare_cn"] if AKSHARE_CN_AVAILABLE else [])
 )
 
 # Mapping of methods to their vendor-specific implementations
@@ -168,6 +184,11 @@ VENDOR_METHODS = {
         "alpha_vantage": get_alpha_vantage_news,
         "yfinance": get_news_yfinance,
         **({"polygon": get_polygon_news} if POLYGON_AVAILABLE else {}),
+        # CN/HK 专用 — auto router 让 .SS/.SZ/.HK ticker 优先走这两条 (上面美股
+        # 三家都不覆盖中文资讯). tushare 公告权威性强, akshare 东财/财联社聚合
+        # 信息密度高, 两个互补.
+        **({"tushare_cn_news": get_tushare_cn_news} if TUSHARE_CN_NEWS_AVAILABLE else {}),
+        **({"akshare_cn": get_akshare_cn_news} if AKSHARE_CN_AVAILABLE else {}),
     },
     "get_global_news": {
         "yfinance": get_global_news_yfinance,
@@ -242,7 +263,18 @@ def _resolve_auto(method: str, args, kwargs) -> list:
     local_first = LOCAL_PARQUET_AVAILABLE and method not in news_methods
 
     if is_cn_hk:
-        # 中港股：local_parquet → efinance → yfinance
+        # 中港股 news 类: tushare 公告 + akshare 东财/财联社 (yfinance/polygon 不覆盖)
+        if method == "get_news":
+            chain = []
+            if TUSHARE_CN_NEWS_AVAILABLE:
+                chain.append("tushare_cn_news")
+            if AKSHARE_CN_AVAILABLE:
+                chain.append("akshare_cn")
+            # fallback 兜底 (大概率拿不到, 但留路)
+            chain.extend(["yfinance", "alpha_vantage"])
+            return chain
+
+        # 中港股 OHLC / 财报: local_parquet → efinance → yfinance
         chain = []
         if local_first:
             chain.append("local_parquet")

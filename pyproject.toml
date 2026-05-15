@@ -31,6 +31,8 @@ dependencies = [
     "tqdm>=4.67.1",
     "typing-extensions>=4.14.0",
     "yfinance>=0.2.63",
+    "akshare>=1.14.0",  # CN/HK 新闻 (东财) + 财联社快讯 + 雪球聚合
+    "tushare>=1.4.0",   # CN 公告 + 公司新闻 (VIP), 走 sh_quant 已用的 token
 ]
 
 [project.scripts]
