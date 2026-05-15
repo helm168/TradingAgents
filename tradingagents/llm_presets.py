@@ -35,12 +35,18 @@ PRESETS: dict[str, dict[str, Any]] = {
         # 小米 MiMo — token plan 订阅版用 token-plan-cn 专属端点 (按月限额计费,
         # 不是按 token 单价). pay-per-token 公开 API 是 api.xiaomimimo.com,
         # 这里固定 token plan 因为用户走的是月订阅档.
-        # MiMo-V2.5-Pro 是 reasoning flagship, deep 和 quick 都用它
-        # (小米这里没像 DeepSeek 那样拆 reasoner/chat 两档).
+        #
+        # deep_think → mimo-v2.5-pro (flagship reasoning, debate/judge 用)
+        # quick_think → mimo-v2.5     (非 pro base 版, analysts/risk/scoring 用)
+        #
+        # 历史教训: deep + quick 都用 pro 时, 单 ticker 跑下来吃 ~65 万 token
+        # (因为 reasoning 模型每轮都展开 thinking chain). 把 quick 任务降到
+        # base 版后, 大头 analyst/risk/scoring 不再走 reasoning, token 估计
+        # 砍 50-70%, 时间也跟着下来 (DeepSeek 这套同理: reasoner+chat 分档).
         "llm_provider": "xiaomi",
         "backend_url": "https://token-plan-cn.xiaomimimo.com/v1",
         "deep_think_llm": "mimo-v2.5-pro",
-        "quick_think_llm": "mimo-v2.5-pro",
+        "quick_think_llm": "mimo-v2.5",
     },
 }
 
