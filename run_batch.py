@@ -233,17 +233,21 @@ def main():
         if do_score and report_dir and report_dir.exists():
             try:
                 print(f"  评分中...")
-                score = score_reports(scoring_llm, report_dir)
+                # ticker 透传到 score_reports → 触发 F-Score (公式化客观分)
+                score = score_reports(scoring_llm, report_dir, ticker=ticker)
                 score_dict = score.to_dict()
                 # 保存到报告目录
                 (report_dir / "scores.json").write_text(
                     json.dumps(score_dict, ensure_ascii=False, indent=2),
                     encoding="utf-8",
                 )
-                # 打印简要
+                # 打印简要 — F-Score 是公式分, 跟 LLM 主观分对照看才有意义
                 t = score.technical_score
                 fv = score.fundamental_score
-                print(f"  技术={t} 基本面={fv} 象限={score.quadrant} 评级={score.final_rating}")
+                fs_v = score.fscore_value
+                fs_disp = f"F={fs_v}/9" if fs_v is not None else "F=—"
+                print(f"  技术={t} 基本面={fv} {fs_disp} "
+                      f"象限={score.quadrant} 评级={score.final_rating}")
             except Exception as e:
                 print(f"  评分失败: {e}")
                 err = err or f"scoring: {e}"

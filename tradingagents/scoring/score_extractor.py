@@ -93,6 +93,15 @@ class ScoreResult:
     sentiment: Optional[dict] = None
     news: Optional[dict] = None
     final_rating: Optional[str] = None  # Buy/Overweight/Hold/Underweight/Sell（从 decision.md 提取）
+    # F-Score 是公式化 0-9 客观分, 用来对比 LLM 主观给的 fundamental_score
+    # (LLM 在 60-90 之间飘的时候, F-Score 是固定锚, 能看出 LLM 是真的看好
+    # 还是手松).
+    fscore: Optional[dict] = None
+    # Q-Score 是绝对质量分 0-100, 跟 F-Score 互补:
+    #   F-Score 看 "改善 trend" (今年 ROA > 去年?)
+    #   Q-Score 看 "绝对水平" (净利率几个? 营收 CAGR 几个?)
+    # 茅台 F-Score 可能 7/9 + Q-Score 90; 烂周期股 F-Score 也可能 7/9 + Q-Score 30.
+    qscore: Optional[dict] = None
     errors: list = field(default_factory=list)
 
     @property
@@ -102,6 +111,14 @@ class ScoreResult:
     @property
     def fundamental_score(self) -> Optional[int]:
         return self.fundamental.get("score") if self.fundamental else None
+
+    @property
+    def fscore_value(self) -> Optional[int]:
+        return self.fscore.get("score") if self.fscore else None
+
+    @property
+    def qscore_value(self) -> Optional[float]:
+        return self.qscore.get("score") if self.qscore else None
 
     @property
     def quadrant(self) -> str:
@@ -123,6 +140,8 @@ class ScoreResult:
         d = asdict(self)
         d["technical_score"] = self.technical_score
         d["fundamental_score"] = self.fundamental_score
+        d["fscore_value"] = self.fscore_value
+        d["qscore_value"] = self.qscore_value
         d["quadrant"] = self.quadrant
         return d
 
@@ -177,16 +196,18 @@ def _extract_final_rating(report_dir: Path) -> Optional[str]:
 
 
 # ---------- 主入口 ----------
-def score_reports(llm, report_dir: str | Path) -> ScoreResult:
+def score_reports(llm, report_dir: str | Path, ticker: Optional[str] = None) -> ScoreResult:
     """
     对一个 ticker 的报告目录（reports/<TICKER>_<时间戳>/）进行打分。
 
     Args:
         llm: 一个已实例化的 LangChain LLM client，需要支持 .invoke(prompt)
         report_dir: 报告目录路径
+        ticker:  可选, 给定就额外算 Piotroski F-Score (公式化 0-9 客观分).
+                 不传则从 report_dir 名字 "<TICKER>_<ts>/" 反推.
 
     Returns:
-        ScoreResult，包含技术/基本面/情绪/新闻四个维度的评分
+        ScoreResult，包含技术/基本面/情绪/新闻 LLM 打分 + F-Score 客观分.
     """
     report_dir = Path(report_dir)
     if not report_dir.exists():
@@ -212,4 +233,27 @@ def score_reports(llm, report_dir: str | Path) -> ScoreResult:
             result.errors.append(f"{kind}: {type(e).__name__}: {e}")
 
     result.final_rating = _extract_final_rating(report_dir)
+
+    # F-Score: 公式化, 不调 LLM. ticker 未传就从 "reports/<TICKER>_<ts>/" 反推.
+    if ticker is None:
+        # report_dir.name 形如 "600519.SS_20260514_213000"
+        ticker = report_dir.name.split("_")[0] if "_" in report_dir.name else None
+    if ticker:
+        # F-Score (改善 trend, 0-9)
+        try:
+            from .fscore import compute_fscore
+            fs = compute_fscore(ticker)
+            if fs is not None:
+                result.fscore = fs.to_dict()
+        except Exception as e:
+            result.errors.append(f"fscore: {type(e).__name__}: {e}")
+        # Q-Score (绝对质量, 0-100)
+        try:
+            from .qscore import compute_qscore
+            qs = compute_qscore(ticker)
+            if qs is not None:
+                result.qscore = qs.to_dict()
+        except Exception as e:
+            result.errors.append(f"qscore: {type(e).__name__}: {e}")
+
     return result
