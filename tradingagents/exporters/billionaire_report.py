@@ -231,16 +231,27 @@ def _extract_verdict(decision_text: str | None, portfolio_md: str) -> dict[str, 
 
 # ─── scores.json 重新映射 ─────────────────────────────────────────────
 def _flatten_scores(score_dict: dict[str, Any]) -> dict[str, Any]:
-    """score_extractor 的输出归一化成扁平 schema."""
+    """score_extractor 的输出归一化成扁平 schema.
+
+    fscore 是 Piotroski 公式分 (0-9), 跟 LLM 主观打的 fundamental (0-100) 是
+    两个不同口径: 同一只股票, fundamental 在三个 LLM 上能差 16 分, 但 fscore
+    完全一致 — UI 用这两个对照, 用户能立刻看出 LLM 是否手松/手紧.
+    """
     technical = score_dict.get("technical") or {}
     fundamental = score_dict.get("fundamental") or {}
     sentiment = score_dict.get("sentiment") or {}
     news = score_dict.get("news") or {}
+    fscore = score_dict.get("fscore") or {}
     return {
         "technical":    score_dict.get("technical_score") if score_dict.get("technical_score") is not None else technical.get("score"),
         "fundamental":  score_dict.get("fundamental_score") if score_dict.get("fundamental_score") is not None else fundamental.get("score"),
         "sentiment":    sentiment.get("score"),
         "news":         news.get("score"),
+        "fscore":       fscore.get("score") if fscore else None,
+        "fscore_max":   fscore.get("max_score") if fscore else None,
+        "fscore_rating": fscore.get("rating") if fscore else None,
+        "fscore_signals": fscore.get("signals") if fscore else None,
+        "fscore_fiscal_year": fscore.get("fiscal_year") if fscore else None,
         "quadrant":     score_dict.get("quadrant"),
         "final_rating": score_dict.get("final_rating"),
     }
