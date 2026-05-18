@@ -83,8 +83,13 @@ class GScoreResult:
     score: float                       # 0-100
     dimensions: list[GScoreDimension] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
-    # 路径质量风险旗标 — 不影响 score, 仅当两点 CAGR 可能虚高时给一句红字提示
+    # 路径质量风险 — 不影响 score, 仅当两点 CAGR 可能虚高时提示.
+    #   risk_note   : 一句通用 caveat (路径有问题才非空)
+    #   risk_ledger : 逐年明细 (营收/净利 绝对值 + YoY% + 拐点文字), 让波动可见
+    #   risk_phases : 分阶段说明 (盈利段连续 CAGR / 亏损段单独描述)
     risk_note: Optional[str] = None
+    risk_ledger: list[dict] = field(default_factory=list)
+    risk_phases: list[str] = field(default_factory=list)
 
     @property
     def rating(self) -> str:
@@ -127,6 +132,8 @@ class GScoreResult:
             ],
             "errors": self.errors,
             "risk_note": self.risk_note,
+            "risk_ledger": self.risk_ledger,
+            "risk_phases": self.risk_phases,
         }
 
 
@@ -199,17 +206,24 @@ def _yoy(curr_v: Optional[float], prev_v: Optional[float]) -> Optional[float]:
 # 路径质量旗标: 两点 CAGR 只看首尾, 中途巨亏 / 畸小基数 / 非单调都被抹平.
 # 这里只**识别**问题 (不改分数), 让前端给一行红字提示用户.
 PATH_MIN_BASE_FRAC = 0.15
+PATH_NONMONO_FRAC = 0.20   # 单年回落 ≥ 峰值 20% 才算"非单调", 滤掉经营小波动
+
+
+RISK_CAVEAT = (
+    "⚠ 路径存疑 —— 两点 CAGR 只看首尾, 中途巨亏/畸小基数被抹平, 分数偏乐观,"
+    " 结合周期位置与 V-Score 估值看"
+)
 
 
 def _path_flags(
     seq: list[Optional[float]],
     years: list[Optional[int]],
-) -> list[str]:
-    """识别算 CAGR 的年度序列的路径质量问题, 返回中文旗标列表.
+) -> list[tuple[str, Optional[int], str]]:
+    """识别算 CAGR 的年度序列的路径质量问题, 返回 (问题, 财年, 金额明细) 行.
 
-    每个旗标都点名是**哪一年** + 当年金额, 不再只说"有亏损年". `years` 与
-    `seq` 同序等长 (调用方按 recent 行对齐传入). 干净复利序列
-    (逐年涨 / 基数不畸小 / 无亏损年) → []; 否则列出问题.
+    每行点名是**哪一年** + 当年金额, 不再只说"有亏损年". `years` 与 `seq`
+    同序等长 (调用方按 recent 行对齐传入). 干净复利序列
+    (逐年涨 / 基数不畸小 / 无亏损年) → []; 否则逐条列出, 一年一行.
     """
     pairs = [
         (y, v)
@@ -220,49 +234,157 @@ def _path_flags(
         return []
     vals = [v for _, v in pairs]
     base_y, base = pairs[0]
-    peak, lo = max(vals), min(vals)
-    flags: list[str] = []
+    peak = max(vals)
+    rows: list[tuple[str, Optional[int], str]] = []
 
-    loss = [(y, v) for y, v in pairs if v <= 0]
-    if loss:
-        flags.append(
-            "亏损年(" + " · ".join(f"{_fy(y)} {_fmt_amt(v)}" for y, v in loss) + ")"
-        )
+    for y, v in pairs:
+        if v <= 0:
+            rows.append(("亏损年", y, _fmt_amt(v)))
     if base <= 0:
-        flags.append(f"基期为负({_fy(base_y)} {_fmt_amt(base)})")
+        rows.append(("基期为负", base_y, _fmt_amt(base)))
     elif peak > 0 and base < PATH_MIN_BASE_FRAC * peak:
-        flags.append(
-            f"基数畸小({_fy(base_y)} {_fmt_amt(base)}, 仅峰值 {base / peak * 100:.0f}%)"
+        rows.append(
+            ("基数畸小", base_y, f"{_fmt_amt(base)} (仅峰值 {base / peak * 100:.0f}%)")
         )
 
-    # 非单调: 点名回落最狠的那一年 (从前一年 → 该年)
+    # 非单调: 点名回落最狠的那一年 (从前一年 → 该年). 但要**有料才报** —
+    # 单年跌幅 < 峰值 20% (例: 茅台 -1.2% 营收小波动) 属正常经营噪声, 不算
+    # 路径存疑, 否则几乎每只票都被旗标淹没. 亏损 / 由盈转亏 由上面的旗标兜底.
     worst = None  # (跌入年, 跌幅, 前值, 后值)
     for i in range(len(pairs) - 1):
         drop = pairs[i][1] - pairs[i + 1][1]
         if drop > 0 and (worst is None or drop > worst[1]):
             worst = (pairs[i + 1][0], drop, pairs[i][1], pairs[i + 1][1])
-    if worst:
+    if worst and peak > 0 and worst[1] >= PATH_NONMONO_FRAC * peak:
         y2, _, a, b = worst
-        flags.append(f"非单调({_fy(y2)} {_fmt_amt(a)}→{_fmt_amt(b)})")
-    return flags
+        rows.append(("非单调", y2, f"{_fmt_amt(a)} → {_fmt_amt(b)}"))
+    return rows
 
 
-def _build_risk_note(rev_seq, ni_seq, years) -> Optional[str]:
-    """把营收/净利两条腿的路径旗标拼成一行红字提示; 都干净则 None."""
-    bits = []
-    rf = _path_flags(rev_seq, years)
-    nf = _path_flags(ni_seq, years)
-    if rf:
-        bits.append("营收 CAGR " + " · ".join(rf))
-    if nf:
-        bits.append("净利 CAGR " + " · ".join(nf))
-    if not bits:
+def _yoy_pct(prev: Optional[float], curr: Optional[float]) -> Optional[float]:
+    """逐年同比 %. 只在 正→正 时有意义: 基期 ≤0 或当期 ≤0 (符号翻转)
+    用百分比表达会出 -338% 这种误导数字, 返 None — 由拐点文字说明."""
+    if prev is None or curr is None or pd.isna(prev) or pd.isna(curr):
         return None
-    return (
-        "⚠ 路径存疑：" + " ｜ ".join(bits)
-        + " —— 两点 CAGR 只看首尾, 中途巨亏/畸小基数被抹平, 分数偏乐观,"
-        " 结合周期位置与 V-Score 估值看"
-    )
+    if prev <= 0 or curr <= 0:
+        return None
+    return (curr / prev - 1.0) * 100.0
+
+
+def _ni_inflection(
+    prev: Optional[float],
+    curr: Optional[float],
+    op_curr: Optional[float],
+) -> Optional[str]:
+    """净利逐年拐点的**机械**判定 (只说发生了什么, 不编造原因).
+
+    `op_curr` = 当年营业利润; 用 营业利润 vs 净利 的背离给一条**数据可推**的
+    线索 (营业利润为正但净利转亏 → 亏损来自减值/营业外/投资等表下项).
+    真正的"为什么"(具体计提了什么) 财报 parquet 没有, 不臆造.
+    """
+    if prev is None or curr is None or pd.isna(prev) or pd.isna(curr):
+        return None
+    if prev > 0 and curr <= 0:
+        if op_curr is not None and not pd.isna(op_curr):
+            if op_curr > 0:
+                return "由盈转亏（营业利润为正，亏损来自减值/营业外/投资等表下项）"
+            return "由盈转亏（主营即亏损）"
+        return "由盈转亏"
+    if prev <= 0 and curr > 0:
+        return "扭亏为盈"
+    if prev < 0 and curr < 0:
+        return "亏损扩大" if abs(curr) > abs(prev) else "亏损收窄"
+    if prev > 0 and curr > 0:
+        y = (curr / prev - 1.0) * 100.0
+        if y <= -30:
+            return f"增速骤降 {y:.0f}%"
+        if y >= 50:
+            return f"高增长 +{y:.0f}%"
+    return None
+
+
+def _build_ledger(years, rev_seq, ni_seq, op_seq) -> list[dict]:
+    """CAGR 窗口内逐年明细: 营收/净利 绝对值 + 同比 + 净利拐点文字.
+
+    第一行是基期 (无 YoY). YoY 是窗口内相邻两年的环比, 让中途波动可见.
+    """
+    rows: list[dict] = []
+    for i, y in enumerate(years):
+        rev = rev_seq[i] if i < len(rev_seq) else None
+        ni = ni_seq[i] if i < len(ni_seq) else None
+        op = op_seq[i] if i < len(op_seq) else None
+        if i == 0:
+            note: Optional[str] = "基期"
+            rev_yoy = ni_yoy = None
+        else:
+            rev_yoy = _yoy_pct(rev_seq[i - 1] if i - 1 < len(rev_seq) else None, rev)
+            ni_yoy = _yoy_pct(ni_seq[i - 1] if i - 1 < len(ni_seq) else None, ni)
+            note = _ni_inflection(ni_seq[i - 1] if i - 1 < len(ni_seq) else None, ni, op)
+        rows.append(
+            {
+                "fy": y,
+                "revenue": rev,
+                "revenue_yoy": rev_yoy,
+                "net_income": ni,
+                "net_income_yoy": ni_yoy,
+                "note": note,
+            }
+        )
+    return rows
+
+
+def _seg_phases(years, seq, label: str) -> list[str]:
+    """分阶段: 把序列按 正/非正 切成连续段, 盈利段算段内 CAGR,
+    亏损段单独描述 (扩大/收窄 + 倍数), 不把两段混在一个两点 CAGR 里."""
+    pairs = [
+        (y, v)
+        for y, v in zip(years, seq)
+        if v is not None and not pd.isna(v)
+    ]
+    if len(pairs) < 2:
+        return []
+    segs: list[list[tuple]] = []
+    for yv in pairs:
+        pos = yv[1] > 0
+        if segs and (segs[-1][0][1] > 0) == pos:
+            segs[-1].append(yv)
+        else:
+            segs.append([yv])
+
+    out: list[str] = []
+    for seg in segs:
+        (y0, s), (y1, e) = seg[0], seg[-1]
+        if s > 0:  # 盈利段
+            if len(seg) >= 2:
+                n = len(seg) - 1
+                cagr = ((e / s) ** (1.0 / n) - 1.0) * 100.0
+                out.append(
+                    f"{label}盈利段 FY{y0}→FY{y1}: {_fmt_amt(s)} → {_fmt_amt(e)}"
+                    f"（{n}Y CAGR {cagr:+.1f}%/yr）"
+                )
+            else:
+                out.append(f"{label}盈利 FY{y0}: {_fmt_amt(s)}（单年）")
+        else:  # 亏损段
+            if len(seg) >= 2:
+                trend = "亏损扩大" if abs(e) > abs(s) else "亏损收窄"
+                mult = f" ~{abs(e) / abs(s):.2f}x" if s != 0 else ""
+                out.append(
+                    f"{label}亏损段 FY{y0}→FY{y1}: {_fmt_amt(s)} → {_fmt_amt(e)}"
+                    f"（{trend}{mult}，CAGR 不可算）"
+                )
+            else:
+                out.append(f"{label}亏损 FY{y0}: {_fmt_amt(s)}（单年）")
+    return out
+
+
+def _build_risk_phases(years, rev_seq, ni_seq) -> list[str]:
+    """只给"路径有问题"的那条腿出分阶段说明, 干净的腿不加噪音."""
+    out: list[str] = []
+    if _path_flags(ni_seq, years):
+        out += _seg_phases(years, ni_seq, "净利 ")
+    if _path_flags(rev_seq, years):
+        out += _seg_phases(years, rev_seq, "营收 ")
+    return out
 
 
 # ─── 主入口 ─────────────────────────────────────────────────────────────
@@ -369,6 +491,18 @@ def compute_gscore(ticker: str) -> Optional[GScoreResult]:
     dims = [dim_rev, dim_ni]
     total = sum(d.score * d.weight for d in dims)
 
+    # ─── 路径风险: 逐年明细 + 分阶段 (仅路径脏时给) ────────────────
+    op_seq = (
+        [_to_float(r) for r in recent["operating_income"].tolist()]
+        if "operating_income" in recent.columns
+        else []
+    )
+    path_dirty = bool(
+        _path_flags(rev_seq, years) or _path_flags(ni_seq, years)
+    )
+    risk_ledger = _build_ledger(years, rev_seq, ni_seq, op_seq) if path_dirty else []
+    risk_phases = _build_risk_phases(years, rev_seq, ni_seq) if path_dirty else []
+
     return GScoreResult(
         ts_code=ts_code,
         fiscal_year_curr=fy_curr,
@@ -376,7 +510,9 @@ def compute_gscore(ticker: str) -> Optional[GScoreResult]:
         n_years=n_years,
         score=total,
         dimensions=dims,
-        risk_note=_build_risk_note(rev_seq, ni_seq, years),
+        risk_ledger=risk_ledger,
+        risk_phases=risk_phases,
+        risk_note=RISK_CAVEAT if path_dirty else None,
     )
 
 
@@ -399,8 +535,23 @@ if __name__ == "__main__":
         for m in d.metrics:
             print(f"    • {m.name:<18} {m.detail}")
         print()
-    if r.risk_note:
-        print(f"  {r.risk_note}\n")
+    if r.risk_ledger:
+        print(f"  {r.risk_note}")
+        print("    财年 | 营收 | 营收YoY | 净利 | 净利YoY | 拐点")
+        print(f"    {'─' * 60}")
+        for w in r.risk_ledger:
+            fy = f"FY{w['fy']}" if w["fy"] is not None else "某年"
+            ry = _fmt_pct(w["revenue_yoy"])
+            ny = _fmt_pct(w["net_income_yoy"])
+            print(
+                f"    {fy} | {_fmt_amt(w['revenue'])} | {ry} | "
+                f"{_fmt_amt(w['net_income'])} | {ny} | {w['note'] or ''}"
+            )
+        if r.risk_phases:
+            print("    分阶段:")
+            for ph in r.risk_phases:
+                print(f"      • {ph}")
+        print()
     if r.errors:
         for e in r.errors:
             print(f"  error: {e}")
