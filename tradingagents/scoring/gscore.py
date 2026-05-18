@@ -176,6 +176,48 @@ def _yoy(curr_v: Optional[float], prev_v: Optional[float]) -> Optional[float]:
 
 
 # ─── 主入口 ─────────────────────────────────────────────────────────────
+# 两点 CAGR 把"中途巨亏 + 周期顶点"完全抹平: 佰维存储 688525 FY2023 巨亏
+# -6.3 亿, 但 FY2022(0.71 亿)→FY2025(8.4 亿) 两点净利 CAGR 仍 127% → 误判高增长.
+# 在 bracket 打分之上叠一层路径惩罚: 亏损年 / 基数畸小 / 非单调 → 乘子压向 0.
+PATH_LOSS_PENALTY = 0.45
+PATH_BASE_PENALTY = 0.30
+PATH_MONO_PENALTY = 0.40
+PATH_MIN_BASE_FRAC = 0.15
+
+
+def _path_penalty(seq: list[Optional[float]]) -> tuple[float, list[str]]:
+    """对算 CAGR 的年度序列做路径质量检查, 返回 (乘子 0-1, flags).
+
+    干净复利序列 (逐年涨 / 基数不畸小 / 无亏损年) → (1.0, []); 路径越脏乘子越低.
+    """
+    clean = [v for v in seq if v is not None and not pd.isna(v)]
+    if len(clean) < 2:
+        return 1.0, []
+    base, peak, lo = clean[0], max(clean), min(clean)
+    flags: list[str] = []
+    deduct = 0.0
+
+    if any(v <= 0 for v in clean):
+        deduct += PATH_LOSS_PENALTY
+        flags.append("亏损年")
+
+    if base <= 0:
+        deduct += PATH_BASE_PENALTY
+        flags.append("基期为负")
+    elif peak > 0 and base < PATH_MIN_BASE_FRAC * peak:
+        deduct += PATH_BASE_PENALTY
+        flags.append("基数畸小")
+
+    total_down = sum(max(clean[i] - clean[i + 1], 0.0) for i in range(len(clean) - 1))
+    span = peak - lo
+    if span > 0 and total_down > 0:
+        violation = min(total_down / span, 1.0)
+        deduct += PATH_MONO_PENALTY * violation
+        flags.append("非单调")
+
+    return max(0.0, min(1.0, 1.0 - deduct)), flags
+
+
 def compute_gscore(ticker: str) -> Optional[GScoreResult]:
     """对单只股票算 G-Score (Growth 0-100).
 
@@ -224,11 +266,20 @@ def compute_gscore(ticker: str) -> Optional[GScoreResult]:
         rev_growth = _yoy(_to_float(curr.get("revenue")), _to_float(base.get("revenue")))
         rev_label = "营收 YoY"
 
-    rev_score = _bracket_score(rev_growth, GROWTH_BRACKETS)
+    rev_raw = _bracket_score(rev_growth, GROWTH_BRACKETS)
+    rev_mult, rev_flags = _path_penalty(rev_seq)
+    rev_score = rev_raw * rev_mult
+    if rev_flags:
+        rev_detail = (
+            f"{_fmt_pct(rev_growth)} → {rev_raw:.0f} 分 "
+            f"[路径惩罚 ×{rev_mult:.2f} → {rev_score:.1f} 分: {'/'.join(rev_flags)}]"
+        )
+    else:
+        rev_detail = f"{_fmt_pct(rev_growth)} → {rev_score:.0f} 分"
     rev_metric = GScoreMetric(
         name=rev_label, value=rev_growth, unit="%",
         score=rev_score,
-        detail=f"{_fmt_pct(rev_growth)} → {rev_score:.0f} 分",
+        detail=rev_detail,
     )
     dim_rev = GScoreDimension(name="营收增长", weight=0.50, score=rev_score, metrics=[rev_metric])
 
@@ -260,10 +311,20 @@ def compute_gscore(ticker: str) -> Optional[GScoreResult]:
                 detail="基期非正或数据缺失 → 0 分",
             )
     else:
+        ni_mult, ni_flags = _path_penalty(ni_seq)
+        ni_raw = ni_score
+        ni_score = ni_raw * ni_mult
+        if ni_flags:
+            ni_detail = (
+                f"{_fmt_pct(ni_growth)} → {ni_raw:.0f} 分 "
+                f"[路径惩罚 ×{ni_mult:.2f} → {ni_score:.1f} 分: {'/'.join(ni_flags)}]"
+            )
+        else:
+            ni_detail = f"{_fmt_pct(ni_growth)} → {ni_score:.0f} 分"
         ni_metric = GScoreMetric(
             name=ni_label, value=ni_growth, unit="%",
             score=ni_score,
-            detail=f"{_fmt_pct(ni_growth)} → {ni_score:.0f} 分",
+            detail=ni_detail,
         )
 
     dim_ni = GScoreDimension(name="净利增长", weight=0.50, score=ni_metric.score, metrics=[ni_metric])
