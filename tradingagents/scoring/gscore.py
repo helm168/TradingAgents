@@ -161,6 +161,17 @@ def _fmt_pct(v: Optional[float]) -> str:
     return f"{v:.2f}%"
 
 
+def _fmt_amt(v: Optional[float]) -> str:
+    """金额 (元) → 亿 紧凑显示, 给路径旗标里点名某年用."""
+    if v is None or pd.isna(v):
+        return "—"
+    return f"{v / 1e8:,.2f}亿"
+
+
+def _fy(y: Optional[int]) -> str:
+    return f"FY{y}" if y is not None else "某年"
+
+
 def _cagr(seq: list[Optional[float]]) -> Optional[float]:
     """seq 按时间升序取首尾算 CAGR (%).
 
@@ -190,33 +201,57 @@ def _yoy(curr_v: Optional[float], prev_v: Optional[float]) -> Optional[float]:
 PATH_MIN_BASE_FRAC = 0.15
 
 
-def _path_flags(seq: list[Optional[float]]) -> list[str]:
+def _path_flags(
+    seq: list[Optional[float]],
+    years: list[Optional[int]],
+) -> list[str]:
     """识别算 CAGR 的年度序列的路径质量问题, 返回中文旗标列表.
 
-    干净复利序列 (逐年涨 / 基数不畸小 / 无亏损年) → []; 否则列出问题.
+    每个旗标都点名是**哪一年** + 当年金额, 不再只说"有亏损年". `years` 与
+    `seq` 同序等长 (调用方按 recent 行对齐传入). 干净复利序列
+    (逐年涨 / 基数不畸小 / 无亏损年) → []; 否则列出问题.
     """
-    clean = [v for v in seq if v is not None and not pd.isna(v)]
-    if len(clean) < 2:
+    pairs = [
+        (y, v)
+        for y, v in zip(years, seq)
+        if v is not None and not pd.isna(v)
+    ]
+    if len(pairs) < 2:
         return []
-    base, peak, lo = clean[0], max(clean), min(clean)
+    vals = [v for _, v in pairs]
+    base_y, base = pairs[0]
+    peak, lo = max(vals), min(vals)
     flags: list[str] = []
-    if any(v <= 0 for v in clean):
-        flags.append("亏损年")
+
+    loss = [(y, v) for y, v in pairs if v <= 0]
+    if loss:
+        flags.append(
+            "亏损年(" + " · ".join(f"{_fy(y)} {_fmt_amt(v)}" for y, v in loss) + ")"
+        )
     if base <= 0:
-        flags.append("基期为负")
+        flags.append(f"基期为负({_fy(base_y)} {_fmt_amt(base)})")
     elif peak > 0 and base < PATH_MIN_BASE_FRAC * peak:
-        flags.append("基数畸小")
-    total_down = sum(max(clean[i] - clean[i + 1], 0.0) for i in range(len(clean) - 1))
-    if peak - lo > 0 and total_down > 0:
-        flags.append("非单调")
+        flags.append(
+            f"基数畸小({_fy(base_y)} {_fmt_amt(base)}, 仅峰值 {base / peak * 100:.0f}%)"
+        )
+
+    # 非单调: 点名回落最狠的那一年 (从前一年 → 该年)
+    worst = None  # (跌入年, 跌幅, 前值, 后值)
+    for i in range(len(pairs) - 1):
+        drop = pairs[i][1] - pairs[i + 1][1]
+        if drop > 0 and (worst is None or drop > worst[1]):
+            worst = (pairs[i + 1][0], drop, pairs[i][1], pairs[i + 1][1])
+    if worst:
+        y2, _, a, b = worst
+        flags.append(f"非单调({_fy(y2)} {_fmt_amt(a)}→{_fmt_amt(b)})")
     return flags
 
 
-def _build_risk_note(rev_seq, ni_seq) -> Optional[str]:
+def _build_risk_note(rev_seq, ni_seq, years) -> Optional[str]:
     """把营收/净利两条腿的路径旗标拼成一行红字提示; 都干净则 None."""
     bits = []
-    rf = _path_flags(rev_seq)
-    nf = _path_flags(ni_seq)
+    rf = _path_flags(rev_seq, years)
+    nf = _path_flags(ni_seq, years)
     if rf:
         bits.append("营收 CAGR " + " · ".join(rf))
     if nf:
@@ -270,6 +305,13 @@ def compute_gscore(ticker: str) -> Optional[GScoreResult]:
 
     fy_curr = int(curr["fiscal_year"]) if "fiscal_year" in curr and pd.notna(curr.get("fiscal_year")) else None
     fy_base = int(base["fiscal_year"]) if "fiscal_year" in base and pd.notna(base.get("fiscal_year")) else None
+
+    # 路径旗标要点名"哪一年", 这里拿 recent 行对齐的财年序列 (与 *_seq 同序等长)
+    years = (
+        [int(y) if pd.notna(y) else None for y in recent["fiscal_year"].tolist()]
+        if "fiscal_year" in recent.columns
+        else [None] * len(recent)
+    )
 
     # ─── 营收增长 ──────────────────────────────────────────────────
     rev_seq = [_to_float(r) for r in recent["revenue"].tolist()] if "revenue" in recent.columns else []
@@ -334,7 +376,7 @@ def compute_gscore(ticker: str) -> Optional[GScoreResult]:
         n_years=n_years,
         score=total,
         dimensions=dims,
-        risk_note=_build_risk_note(rev_seq, ni_seq),
+        risk_note=_build_risk_note(rev_seq, ni_seq, years),
     )
 
 
