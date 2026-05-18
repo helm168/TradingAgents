@@ -19,9 +19,12 @@ ticker 归一化
 """
 from __future__ import annotations
 
+import json
 import logging
 import re
 from typing import Optional
+
+import requests
 
 logger = logging.getLogger(__name__)
 
@@ -58,6 +61,66 @@ def _to_akshare_symbol(ticker: str) -> Optional[str]:
     return None
 
 
+def _fetch_em_news_direct(symbol: str, timeout: int = 15):
+    """Direct Eastmoney fallback for AKShare stock_news_em breakages."""
+    import pandas as pd
+
+    callback = "jQuery3510875346244069884_1668256937995"
+    url = "https://search-api-web.eastmoney.com/search/jsonp"
+    params = {
+        "cb": callback,
+        "param": json.dumps(
+            {
+                "uid": "",
+                "keyword": symbol,
+                "type": ["cmsArticleWebOld"],
+                "client": "web",
+                "clientType": "web",
+                "clientVersion": "curr",
+                "param": {
+                    "cmsArticleWebOld": {
+                        "searchScope": "default",
+                        "sort": "default",
+                        "pageIndex": 1,
+                        "pageSize": 100,
+                        "preTag": "<em>",
+                        "postTag": "</em>",
+                    }
+                },
+            },
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ),
+    }
+    response = requests.get(url, params=params, timeout=timeout)
+    response.raise_for_status()
+    text = response.text.strip()
+    prefix = f"{callback}("
+    if text.startswith(prefix) and text.endswith(")"):
+        text = text[len(prefix):-1]
+    data = json.loads(text)
+    articles = data.get("result", {}).get("cmsArticleWebOld", [])
+    df = pd.DataFrame(articles)
+    if df.empty:
+        return df
+
+    df = df.rename(
+        columns={
+            "date": "发布时间",
+            "mediaName": "文章来源",
+            "title": "新闻标题",
+            "content": "新闻内容",
+            "url": "新闻链接",
+        }
+    )
+    df["关键词"] = symbol
+    for col in ("新闻标题", "新闻内容"):
+        if col in df.columns:
+            df[col] = df[col].astype(str).str.replace(r"</?em>", "", regex=True)
+    cols = ["关键词", "新闻标题", "新闻内容", "发布时间", "文章来源", "新闻链接"]
+    return df[[col for col in cols if col in df.columns]]
+
+
 def fetch_em_news_block(ticker: str, limit: int = 30) -> str:
     """东方财富个股新闻 markdown block (sentiment_analyst prompt 注入用).
 
@@ -75,7 +138,15 @@ def fetch_em_news_block(ticker: str, limit: int = 30) -> str:
         df = ak.stock_news_em(symbol=symbol)
     except Exception as e:
         logger.warning("AKShare stock_news_em failed for %s: %s", ticker, e)
-        return f"<东财新闻拉取失败: {type(e).__name__}: {e}>"
+        try:
+            df = _fetch_em_news_direct(symbol)
+            logger.info("Eastmoney direct news fallback succeeded for %s", ticker)
+        except Exception as fallback_e:
+            logger.warning("Eastmoney direct news fallback failed for %s: %s", ticker, fallback_e)
+            return (
+                f"<东财新闻拉取失败: AKShare {type(e).__name__}: {e}; "
+                f"direct fallback {type(fallback_e).__name__}: {fallback_e}>"
+            )
 
     if df is None or len(df) == 0:
         return f"<{ticker} 东财近期无新闻>"
