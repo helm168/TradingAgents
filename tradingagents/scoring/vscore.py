@@ -256,10 +256,12 @@ def compute_vscore(ticker: str) -> Optional[VScoreResult]:
 
     valuation = _read_latest_valuation(ts_code)
     if valuation is None:
-        return VScoreResult(
-            ts_code=ts_code, as_of_date=None, score=0.0,
-            errors=["没有本地 daily_basic 数据, 运行 sh_quant pull_daily_basic.py 拉取"],
-        )
+        # 缺 daily_basic: 返 None 让调用方降级 (compute_quant_scores.py 据此把
+        # envelope 的 vscore 置 null, 下游显示"估值数据缺失" NA 卡)。
+        # 绝不返 score=0.0 的对象——rating 纯按 score 分档, score=0 会落进
+        # "泡沫", 把"没算"误渲染成"贵到泡沫"的确定性结论, 语义完全相反。
+        logger.info("V-Score 跳过 %s: 无本地 daily_basic (US 跑 pull_us_daily_basic.py)", ts_code)
+        return None
 
     pe = valuation["pe_ttm"]
     pb = valuation["pb"]
