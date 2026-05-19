@@ -16,3 +16,15 @@ user.email = sunhao_1988@msn.cn
 ### Commit message 格式
 
 commit message 保持一行描述即可，不写多段正文，除非用户明确要求。
+
+### 本地提交防线
+
+仓库启用 `.githooks/commit-msg` 拒绝自动归属 trailer，避免 agent / IDE
+在 commit message 里偷偷加 `Co-Authored-By` / `Signed-off-by` /
+`Generated-by` / `Authored-by-AI`。
+
+首次 clone 后跑一次：
+
+```bash
+git config core.hooksPath .githooks
+```
