@@ -180,6 +180,76 @@ _ACTION_PATTERNS = [
 # 取强度更进一步: STRONG / Overweight / 强烈 都给高 confidence
 _STRONG_RE = re.compile(r"STRONG|OVERWEIGHT|UNDERWEIGHT|强烈|加仓|增持|减仓", re.I)
 
+# 决策行标签 (优先级: 最具体的在前). 借鉴同仓库 feishu_render.py 的标签表.
+_DECISION_LABEL_RES = [
+    re.compile(r"最终交易决策"),
+    re.compile(r"FINAL\s+TRANSACTION\s+PROPOSAL", re.I),
+    re.compile(r"Final\s+Trading\s+Decision", re.I),
+    re.compile(r"最终决策"),
+    re.compile(r"Final\s+Decision", re.I),
+    re.compile(r"最终评级"),
+    re.compile(r"\bRating\b", re.I),
+    re.compile(r"评级"),
+]
+# 标签后取这么多字符当"决策短语"扫描. 短窗口避免读进下一段散文里夹带的
+# 零散英文 BUY/Overweight token (那正是 SNDK 正文「卖出」被误标 BUY 的根因).
+_DECISION_WINDOW = 120
+
+
+def _scan_action(text: str) -> tuple[str, bool]:
+    """在文本上跑 _ACTION_PATTERNS, 按模式表顺序首个命中即停.
+
+    返回 (action, 是否强信号); 没命中返回 ("UNKNOWN", False).
+    仅供"无决策行"时的整篇兜底用 (老行为, 不改).
+    """
+    for pat, label in _ACTION_PATTERNS:
+        if pat.search(text):
+            return label, bool(_STRONG_RE.search(text))
+    return "UNKNOWN", False
+
+
+def _earliest_action(text: str) -> tuple[str, bool]:
+    """取文本里**位置最靠前**的判词 (而非模式表里靠前的).
+
+    决策行窗口专用. _scan_action 那种"模式表首个命中"会让
+    ``Rating: Hold ... (后文夹带) Overweight`` 因 OVERWEIGHT 模式排在
+    HOLD 前而误判 BUY (实测 688498.gpt-5.5). 紧跟标签的那个判词才是决策,
+    所以按出现位置取最早的一个; 同位置并列时保留 _ACTION_PATTERNS 的
+    优先级 (STRONG BUY 先于 BUY). 强度只看判词紧邻上下文, 不被远处
+    无关的 减仓/增持 带成假"强信号".
+    """
+    best_pos: int | None = None
+    best_label = "UNKNOWN"
+    for pat, label in _ACTION_PATTERNS:
+        m = pat.search(text)
+        if m and (best_pos is None or m.start() < best_pos):
+            best_pos = m.start()
+            best_label = label
+    if best_pos is None:
+        return "UNKNOWN", False
+    neighborhood = text[max(0, best_pos - 4): best_pos + 24]
+    return best_label, bool(_STRONG_RE.search(neighborhood))
+
+
+def _action_from_decision_line(src: str) -> tuple[str, bool]:
+    """优先从显式决策行 / Rating 行抽 action.
+
+    PM 论述是大段中文散文, 里头常夹带英文 BUY/Overweight (模板回显
+    ``FINAL TRANSACTION PROPOSAL: **BUY/HOLD/SELL**``、引用子分析师等).
+    对整篇做"首个命中即停"会被这些零散 token 带偏 (SNDK 正文明确「卖出」
+    却被标成 BUY). 所以先锚定到决策行, 只在标签后的短窗口里判定; 抽不到
+    再由调用方退回整篇扫描.
+    """
+    for lab in _DECISION_LABEL_RES:
+        m = lab.search(src)
+        if not m:
+            continue
+        window = src[m.end(): m.end() + _DECISION_WINDOW]
+        action, strong = _earliest_action(window)
+        if action != "UNKNOWN":
+            return action, strong
+    return "UNKNOWN", False
+
 
 def _extract_verdict(decision_text: str | None, portfolio_md: str) -> dict[str, Any]:
     """从 portfolio manager 文本里抽 verdict.
@@ -189,31 +259,26 @@ def _extract_verdict(decision_text: str | None, portfolio_md: str) -> dict[str, 
     signal_processor.process_signal() 会把这个详细 markdown 压缩成简短
     "Hold"/"Buy"/"Sell" 一个词, 这就是 run_batch 传给我们的 decision_text.
 
-    简短 signal 丢掉了 Overweight=BUY / Underweight=SELL 的强度信息.
-    所以两个都扫, 取较强信号:
-      - portfolio_md 命中 Underweight → SELL  (强 prefer)
-      - decision_text 命中 Hold → HOLD          (弱 fallback)
+    抽取优先级:
+      1. portfolio_md 的显式决策行 (最终交易决策 / Rating: ...) — 最可信
+      2. decision_text 的显式决策行
+      3. portfolio_md 整篇扫描 (老行为, 无决策行时的兜底)
+      4. decision_text 整篇扫描
     """
-    # 拼接 portfolio_md (rich) + decision_text (compressed), portfolio 优先
+    # portfolio_md (rich) 优先于 decision_text (compressed)
     src_rich = portfolio_md or ""
     src_compressed = decision_text or ""
 
-    # 第一轮在 rich source 上 scan, 命中就用
-    action = "UNKNOWN"
-    matched_strength = False
-    for pat, label in _ACTION_PATTERNS:
-        if pat.search(src_rich):
-            action = label
-            matched_strength = bool(_STRONG_RE.search(src_rich))
-            break
-
-    # 第二轮 fallback 到 compressed signal (没 rich 或 rich 没命中)
+    # 1+2. 优先锚定显式决策行
+    action, matched_strength = _action_from_decision_line(src_rich)
     if action == "UNKNOWN":
-        for pat, label in _ACTION_PATTERNS:
-            if pat.search(src_compressed):
-                action = label
-                matched_strength = bool(_STRONG_RE.search(src_compressed))
-                break
+        action, matched_strength = _action_from_decision_line(src_compressed)
+
+    # 3+4. 没有可识别决策行才退回整篇扫描 (老行为, 末位兜底)
+    if action == "UNKNOWN":
+        action, matched_strength = _scan_action(src_rich)
+    if action == "UNKNOWN":
+        action, matched_strength = _scan_action(src_compressed)
 
     if matched_strength:
         confidence = 0.85
