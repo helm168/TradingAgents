@@ -166,7 +166,7 @@ def _safe_div(a, b) -> Optional[float]:
 #   年中拿最新季会拿到"被压低的半年/三季值" (e.g. Q1 ROE 只有 1 季利润 ≈ 2%,
 #   不是公司真实水平). 美股 (.US) 反过来是**单季离散**, 4 季直接相加才是 TTM.
 #   所以这里按市场分支拼出滚动 12 个月流量, 再由调用方自己算比率.
-_FLOW_COLS = ("revenue", "gross_profit", "net_income", "operating_cf")
+_FLOW_COLS = ("revenue", "gross_profit", "net_income", "net_income_dedt", "operating_cf")
 
 
 def _is_discrete_market(ts_code: str) -> bool:
@@ -262,7 +262,14 @@ def compute_qscore(ticker: str) -> Optional[QScoreResult]:
     只 ~1 个季度而非最多 4+ 个季度. 流量按市场分支拼 (A 股累计 / 美股离散,
     见 `_ttm_flows`), 比率全部用 TTM 流量重算, 不读 parquet 那几个会随
     季度缩水的 roe/roa/net_margin 列. 时点项 (资产负债率/流动比率/净资产/
-    总资产) 取最新季快照. TTM 历史不足时回退最近年报 (basis="annual").
+    总资产) 取最新季快照. TTM 历史不足时回退最近年报 (basis="annual"),
+    annual 路径也现算不读 parquet 预算列, 保持口径一致.
+
+    净利率/ROE/ROA/cfo_quality 的分子用**扣非净利润** (net_income_dedt,
+    缺失回退 net_income) — 一笔大额非经常性损益(投资收益/公允价值变动等)
+    会原样进底线净利润, 把净利率灌过毛利率、盈利能力白拿满分, 质量分
+    必须看可持续利润. 美股 parquet 无此列 → 自动回退 net_income (FMP
+    netIncome 本就是标准口径, 不受影响).
     """
     ts_code = normalize_ts_code(ticker)
     fp = _financial_path(ts_code)
@@ -285,13 +292,16 @@ def compute_qscore(ticker: str) -> Optional[QScoreResult]:
         equity = _to_float(cur.get("total_equity"))       # 时点
         ttm_rev, ttm_gp = ttm["revenue"], ttm["gross_profit"]
         ttm_ni, ttm_ocf = ttm["net_income"], ttm["operating_cf"]
+        # 质量分口径: 净利率/ROE/ROA/cfo_quality 用扣非净利, 缺失回退底线净利
+        ttm_ni_dedt = ttm.get("net_income_dedt")
+        ni_q = ttm_ni_dedt if ttm_ni_dedt is not None else ttm_ni
 
-        net_margin = (ttm_ni / ttm_rev * 100.0) if (ttm_ni is not None and ttm_rev and ttm_rev > 0) else None
+        net_margin = (ni_q / ttm_rev * 100.0) if (ni_q is not None and ttm_rev and ttm_rev > 0) else None
         gross_margin = (ttm_gp / ttm_rev * 100.0) if (ttm_gp is not None and ttm_rev and ttm_rev > 0) else None
-        roe = (ttm_ni / equity * 100.0) if (ttm_ni is not None and equity and equity > 0) else None
-        roa = (ttm_ni / ta * 100.0) if (ttm_ni is not None and ta and ta > 0) else None
+        roe = (ni_q / equity * 100.0) if (ni_q is not None and equity and equity > 0) else None
+        roa = (ni_q / ta * 100.0) if (ni_q is not None and ta and ta > 0) else None
         ocf_return = (ttm_ocf / ta * 100.0) if (ttm_ocf is not None and ta and ta > 0) else None
-        cfo_quality = _safe_div(ttm_ocf, ttm_ni)          # OCF / NI 倍数 (均 TTM)
+        cfo_quality = _safe_div(ttm_ocf, ni_q)            # OCF / 扣非NI 倍数 (均 TTM)
         debt_ratio = _to_float(cur.get("debt_to_equity")) # 时点 (实为总负债/总资产*100)
         if debt_ratio is None or debt_ratio < 0:
             tl = _to_float(cur.get("total_liabilities"))
@@ -318,12 +328,18 @@ def compute_qscore(ticker: str) -> Optional[QScoreResult]:
         errors.append(f"TTM 历史不足, 回退最近年报 ({as_of})")
         ta = _to_float(curr.get("total_assets"))
         ocf = _to_float(curr.get("operating_cf"))
-        net_margin = _to_float(curr.get("net_margin"))
+        # 扣非现算 (口径与 TTM 路径一致), 不读 parquet 预算的 net_margin/roe/roa
+        nid = _to_float(curr.get("net_income_dedt"))
+        if nid is None:
+            nid = _to_float(curr.get("net_income"))
+        rev_a = _to_float(curr.get("revenue"))
+        eq_a = _to_float(curr.get("total_equity"))
+        net_margin = (nid / rev_a * 100.0) if (nid is not None and rev_a and rev_a > 0) else None
         gross_margin = _to_float(curr.get("gross_margin"))
-        roe = _to_float(curr.get("roe"))
-        roa = _to_float(curr.get("roa"))
+        roe = (nid / eq_a * 100.0) if (nid is not None and eq_a and eq_a > 0) else None
+        roa = (nid / ta * 100.0) if (nid is not None and ta and ta > 0) else None
         ocf_return = (ocf / ta * 100.0) if (ocf is not None and ta and ta > 0) else None
-        cfo_quality = _safe_div(ocf, _to_float(curr.get("net_income")))
+        cfo_quality = _safe_div(ocf, nid)
         debt_ratio = _to_float(curr.get("debt_to_equity"))
         if debt_ratio is None or debt_ratio < 0:
             tl = _to_float(curr.get("total_liabilities"))
