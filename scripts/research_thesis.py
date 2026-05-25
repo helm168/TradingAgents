@@ -22,12 +22,12 @@
 
 环境:
     ANTHROPIC_API_KEY        必填, 走 raw anthropic SDK
-    WEALTHPILOT_REPO         可选, 知识库 repo 根; 默认 ~/Documents/Code/WealthPilot
-    SH_QUANT_DATA_DIR        可选, 输出根; 默认 ~/.market_data, 拼 /thesis
+    SH_QUANT_DATA_DIR        可选, 共享数据根; 默认 ~/.market_data
 
-输出:
-    <data_dir>/thesis/observations_<date>.json    本次产出
-    <data_dir>/thesis/observations_latest.json    指向最新 (App 读这个)
+输入 / 输出 (都在共享数据根下, 跟 agent_reports 通路对称):
+    <data_dir>/thesis/knowledge.json              ← WealthPilot dev server 启动时 sync
+    <data_dir>/thesis/observations_<date>.json    ← 本次产出
+    <data_dir>/thesis/observations_latest.json    ← 指向最新 (WealthPilot middleware 读)
 
 PRD §4.2 / §8 — 调研失败/查不到 → unknown, 不编. evidence 强制带可点 URL.
 """
@@ -59,10 +59,10 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--max-web-search-uses", type=int, default=5,
                    help="单 concern 最多调几次 web_search (default: 5)")
     p.add_argument("--max-tokens", type=int, default=4096)
-    p.add_argument("--wealthpilot-repo", default=None,
-                   help="WealthPilot repo root (默认: $WEALTHPILOT_REPO 或 ~/Documents/Code/WealthPilot)")
+    p.add_argument("--knowledge-path", default=None,
+                   help="knowledge.json 显式路径 (调试用; 默认 $SH_QUANT_DATA_DIR/thesis/knowledge.json)")
     p.add_argument("--output-dir", default=None,
-                   help="输出根目录 (默认: $SH_QUANT_DATA_DIR/thesis 或 ~/.market_data/thesis)")
+                   help="observations 输出目录 (默认 $SH_QUANT_DATA_DIR/thesis 或 ~/.market_data/thesis)")
     p.add_argument("--company", action="append", default=None, dest="companies",
                    metavar="COMPANY_ID",
                    help="只跑这些 companyId (例 fmp:NVDA, 可重复)")
@@ -96,7 +96,7 @@ def main() -> int:
         model=args.model,
         max_web_search_uses=args.max_web_search_uses,
         max_tokens=args.max_tokens,
-        wealthpilot_repo=args.wealthpilot_repo,
+        knowledge_path=args.knowledge_path,
         output_dir=args.output_dir,
         only_company_ids=args.companies,
         only_track_ids=args.tracks,

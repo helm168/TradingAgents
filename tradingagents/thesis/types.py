@@ -126,15 +126,15 @@ class ResearchConfig:
 
     max_tokens: int = 4096
 
-    # 跨 repo 路径
-    wealthpilot_repo: Optional[str] = None
-    """WealthPilot repo 根. None → 用 env WEALTHPILOT_REPO; 还没有 → 默认
-    ~/Documents/Code/WealthPilot."""
+    # I/O 路径 — 都在共享数据根下, 跟 agent_reports 通路对称, 不感知 WealthPilot.
+    knowledge_path: Optional[str] = None
+    """knowledge.json 路径. None → $SH_QUANT_DATA_DIR/thesis/knowledge.json 或
+    ~/.market_data/thesis/knowledge.json. 真源是 WealthPilot dev server
+    启动时 sync 过来的 (vite middleware 干的)."""
 
-    # 产出
     output_dir: Optional[str] = None
-    """~/.market_data/thesis/. None → 用 env SH_QUANT_DATA_DIR + /thesis,
-    fallback ~/.market_data/thesis/."""
+    """observations_*.json 输出目录. None → $SH_QUANT_DATA_DIR/thesis 或
+    ~/.market_data/thesis/."""
 
     # 范围过滤
     only_company_ids: Optional[List[str]] = None
