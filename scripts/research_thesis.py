@@ -78,8 +78,34 @@ def _parse_args() -> argparse.Namespace:
                    help="不在本次范围内的 observation 沿用上次 latest.json (默认丢掉)")
     p.add_argument("--dry-run", action="store_true",
                    help="不调 LLM, 不落盘 (review prompt 用)")
+    p.add_argument("--print-prompts", action="store_true",
+                   help="打印当前 system + 示例 user prompt (用于迭代). 不调 LLM 不落盘.")
     p.add_argument("-v", "--verbose", action="store_true")
     return p.parse_args()
+
+
+def _do_print_prompts() -> int:
+    """打印当前生效的 system + 用 knowledge.json 第一个 concern 渲染的示例 user prompt.
+    Prompt 路径出现在前面的 INFO log 里."""
+    from tradingagents.thesis.knowledge_loader import load_knowledge
+    from tradingagents.thesis.providers._common import (
+        SYSTEM_PROMPT,
+        build_user_prompt,
+    )
+    print("─" * 60)
+    print("SYSTEM PROMPT")
+    print("─" * 60)
+    print(SYSTEM_PROMPT)
+    print()
+    print("─" * 60)
+    print("USER PROMPT (示例: 知识库里第一张卡的第一个关切点)")
+    print("─" * 60)
+    knowledge = load_knowledge(ResearchConfig())
+    card = knowledge["cards"][0]
+    track = next((t for t in knowledge["tracks"] if t["id"] == card["thesis"].get("track")), None)
+    concern = card["concerns"][0]
+    print(build_user_prompt(card, track, concern, None))
+    return 0
 
 
 def main() -> int:
@@ -88,6 +114,9 @@ def main() -> int:
         level=logging.DEBUG if args.verbose else logging.INFO,
         format="%(asctime)s %(levelname)s %(message)s",
     )
+
+    if args.print_prompts:
+        return _do_print_prompts()
 
     # provider-specific default model
     model = args.model

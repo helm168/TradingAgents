@@ -1,11 +1,27 @@
-"""Provider 共享: prompt / JSON 解析 / observation skeleton."""
+"""Provider 共享: prompt 加载 / JSON 解析 / observation skeleton.
+
+Prompt 落盘
+────────
+SYSTEM_PROMPT 和 user prompt 模板都从 .md 文件读, 不写死在 .py 里. 这样你
+不动代码就能迭代 prompt. 加载顺序 (越靠前优先级越高):
+
+  1. env THESIS_PROMPTS_DIR 指向的目录
+  2. $SH_QUANT_DATA_DIR/thesis/prompts/   (默认 ~/.market_data/thesis/prompts/)
+     ← **本地 override**: 想试新版 prompt 在这放, gitignored, agent 优先用
+  3. <repo>/tradingagents/thesis/prompts/  ← 仓库内默认, 跟代码同源
+
+模块 import 时一次性加载, 启动 log 会 print 用的是哪份, 方便排查 "为啥改了
+prompt 不生效".
+"""
 from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 from datetime import date
-from typing import Optional
+from pathlib import Path
+from typing import Optional, Tuple
 
 from ..types import (
     ConcernDefinition,
@@ -18,44 +34,54 @@ from ..types import (
 logger = logging.getLogger(__name__)
 
 
-SYSTEM_PROMPT = """你是一名行业研究分析师, 给一名持仓投资者做"投资逻辑跟踪".
+# ── Prompt 加载 ───────────────────────────────────────────────────────
 
-你的任务: 针对一只股票的**一个**核心关切点 (行业运营指标), 联网拉最新数据,
-对照判断标准给出当前景气度判级 (bullish / neutral / bearish / unknown),
-**必须附可点击的证据来源**.
+_REPO_PROMPTS_DIR = Path(__file__).resolve().parent.parent / "prompts"
 
-规则 (硬约束):
-1. **没有可靠源 → unknown**. 找不到最近 60 天内的权威披露 / 报告 / 财报口径,
-   一律 status="unknown", 不要硬猜.
-2. **非 unknown 必须带 evidence**. 每条 evidence 必须有: source 名 / 真实 url
-   (http 或 https 开头) / 来源原文片段 quote / 发布日期 publishedAt
-   (YYYY-MM-DD).
-3. **不编**. 数字 / URL / 引文不许编造. 不确定就 unknown.
-4. **措辞中性**. 用"景气/转弱/留意/值得关注", 不出现"买入/卖出/加仓/减仓/目标价".
-5. **只返回 JSON**, **不要任何前置说明** (禁止 "根据搜索结果, 以下是..." 之类), 不要 markdown fence (```json), 不要前后缀文字, 不要 reasoning.
 
-返回 JSON 形状:
+def _candidate_prompt_dirs() -> list[Path]:
+    """按优先级返回候选目录列表."""
+    out: list[Path] = []
+    env_dir = os.environ.get("THESIS_PROMPTS_DIR")
+    if env_dir:
+        out.append(Path(env_dir).expanduser().resolve())
+    sh_root = os.environ.get("SH_QUANT_DATA_DIR")
+    user_dir = (
+        Path(sh_root).expanduser().resolve() / "thesis" / "prompts"
+        if sh_root
+        else Path.home() / ".market_data" / "thesis" / "prompts"
+    )
+    out.append(user_dir)
+    out.append(_REPO_PROMPTS_DIR)
+    return out
 
-{
-  "status": "bullish" | "neutral" | "bearish" | "unknown",
-  "trend": "up" | "flat" | "down" | "unknown",
-  "headline": "<中文一句话标题, ≤ 50 字>",
-  "detail": "<中文 2-3 句解释判级理由>",
-  "metrics": { "<key>": "<value>" },
-  "evidence": [
-    {
-      "source": "<来源名>",
-      "url": "<完整 URL>",
-      "quote": "<原文片段>",
-      "publishedAt": "YYYY-MM-DD"
-    }
-  ],
-  "confidence": "high" | "medium" | "low"
-}
 
-confidence 自评: 来源权威且口径吻合 = high; 来源间接 / 口径存疑 = medium;
-来源不太靠谱 = low (但仍带证据).
-"""
+def _load_prompt(filename: str) -> Tuple[str, Path]:
+    """返回 (内容, 实际命中的路径). 找不到任何候选 → raise."""
+    tried = []
+    for d in _candidate_prompt_dirs():
+        p = d / filename
+        tried.append(str(p))
+        if p.exists():
+            return p.read_text(encoding="utf-8"), p
+    raise FileNotFoundError(
+        f"thesis prompt {filename!r} not found. tried:\n  " + "\n  ".join(tried)
+    )
+
+
+SYSTEM_PROMPT, _SYSTEM_PROMPT_PATH = _load_prompt("system.md")
+_USER_PROMPT_TEMPLATE, _USER_PROMPT_PATH = _load_prompt("user.md.tmpl")
+
+logger.info("[thesis prompts] system  = %s", _SYSTEM_PROMPT_PATH)
+logger.info("[thesis prompts] user    = %s", _USER_PROMPT_PATH)
+
+
+def reload_prompts() -> None:
+    """运行时强制重新加载 prompts (改完 .md 不重启进程也能用; 主要给
+    REPL / test / dry-run 反复改 prompt 用)."""
+    global SYSTEM_PROMPT, _USER_PROMPT_TEMPLATE
+    SYSTEM_PROMPT, _ = _load_prompt("system.md")
+    _USER_PROMPT_TEMPLATE, _ = _load_prompt("user.md.tmpl")
 
 
 def build_user_prompt(
@@ -71,34 +97,23 @@ def build_user_prompt(
     prev_line = (
         f"上次调研判级: {previous_status}" if previous_status else "上次调研判级: 无 (首次)"
     )
-    return f"""# 公司
-{card['displayName']} ({card['companyId']})
-
-# 投资逻辑 (为什么持有)
-赛道: {track_label}
-环节: {thesis.get('node', '')}
-一句话: {thesis.get('summary', '')}
-
-# 本次研究的关切点
-名称: {concern['label']}
-为什么是命门: {concern['why']}
-
-# 判级标准 (严格按这个来)
-- bullish: {rubric['bullish']}
-- neutral: {rubric['neutral']}
-- bearish: {rubric['bearish']}
-
-# 检索指引
-查询关键词: {hint['query']}
-优先采信源 (按顺序): {', '.join(hint['preferredSources'])}
-期望数据形态: {hint['expectedShape']}
-
-# 上下文
-{prev_line}
-今天日期: {date.today().isoformat()}
-
-请用 web_search 工具检索最新数据, 然后输出 JSON.
-"""
+    return _USER_PROMPT_TEMPLATE.format(
+        display_name=card["displayName"],
+        company_id=card["companyId"],
+        track_label=track_label,
+        node=thesis.get("node", ""),
+        summary=thesis.get("summary", ""),
+        concern_label=concern["label"],
+        why=concern["why"],
+        rubric_bullish=rubric["bullish"],
+        rubric_neutral=rubric["neutral"],
+        rubric_bearish=rubric["bearish"],
+        hint_query=hint["query"],
+        hint_sources=", ".join(hint["preferredSources"]),
+        hint_shape=hint["expectedShape"],
+        prev_line=prev_line,
+        today=date.today().isoformat(),
+    )
 
 
 # Claude 实测会加 "根据搜索结果, 以下是..." 前言再用 ```json fence — 软约束不一定听.
