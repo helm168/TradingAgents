@@ -1,0 +1,115 @@
+#!/usr/bin/env python3
+"""调研 WealthPilot 投资逻辑卡里的关切点, 落盘 observations JSON.
+
+用法:
+    # 全量调研 (周频 cron 用)
+    python scripts/research_thesis.py
+
+    # 只跑 NVDA 一只票
+    python scripts/research_thesis.py --company fmp:NVDA
+
+    # 只跑白酒赛道 (验证下行识别)
+    python scripts/research_thesis.py --track baijiu
+
+    # 只跑某个关切点 (例: 茅台批价)
+    python scripts/research_thesis.py --company cn:600519 --concern feitian-wholesale-price
+
+    # Dry run (不调 LLM, 不落盘, 只打印 prompt 长度)
+    python scripts/research_thesis.py --dry-run --company fmp:NVDA
+
+    # 部分重跑 + 保留上次范围外的 observation
+    python scripts/research_thesis.py --company fmp:NVDA --keep-previous
+
+环境:
+    ANTHROPIC_API_KEY        必填, 走 raw anthropic SDK
+    WEALTHPILOT_REPO         可选, 知识库 repo 根; 默认 ~/Documents/Code/WealthPilot
+    SH_QUANT_DATA_DIR        可选, 输出根; 默认 ~/.market_data, 拼 /thesis
+
+输出:
+    <data_dir>/thesis/observations_<date>.json    本次产出
+    <data_dir>/thesis/observations_latest.json    指向最新 (App 读这个)
+
+PRD §4.2 / §8 — 调研失败/查不到 → unknown, 不编. evidence 强制带可点 URL.
+"""
+from __future__ import annotations
+
+import argparse
+import logging
+import os
+import sys
+from pathlib import Path
+
+# 让 scripts/ 下的脚本能 import tradingagents/
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(_REPO_ROOT))
+
+# Load .env (跟 run_batch.py 一致 — TradingAgents 项目约定)
+from dotenv import load_dotenv  # noqa: E402
+
+load_dotenv(_REPO_ROOT / ".env")
+
+from tradingagents.thesis.runner import run_research  # noqa: E402
+from tradingagents.thesis.types import ResearchConfig  # noqa: E402
+
+
+def _parse_args() -> argparse.Namespace:
+    p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    p.add_argument("--model", default="claude-sonnet-4-5",
+                   help="Anthropic model id (default: claude-sonnet-4-5)")
+    p.add_argument("--max-web-search-uses", type=int, default=5,
+                   help="单 concern 最多调几次 web_search (default: 5)")
+    p.add_argument("--max-tokens", type=int, default=4096)
+    p.add_argument("--wealthpilot-repo", default=None,
+                   help="WealthPilot repo root (默认: $WEALTHPILOT_REPO 或 ~/Documents/Code/WealthPilot)")
+    p.add_argument("--output-dir", default=None,
+                   help="输出根目录 (默认: $SH_QUANT_DATA_DIR/thesis 或 ~/.market_data/thesis)")
+    p.add_argument("--company", action="append", default=None, dest="companies",
+                   metavar="COMPANY_ID",
+                   help="只跑这些 companyId (例 fmp:NVDA, 可重复)")
+    p.add_argument("--track", action="append", default=None, dest="tracks",
+                   metavar="TRACK_ID",
+                   help="只跑这些赛道 (例 ai-compute / baijiu / upstream-chokepoint, 可重复)")
+    p.add_argument("--concern", action="append", default=None, dest="concerns",
+                   metavar="CONCERN_ID",
+                   help="只跑这些 concernId (例 feitian-wholesale-price, 可重复)")
+    p.add_argument("--keep-previous", action="store_true",
+                   help="不在本次范围内的 observation 沿用上次 latest.json (默认丢掉)")
+    p.add_argument("--dry-run", action="store_true",
+                   help="不调 LLM, 不落盘 (review prompt 用)")
+    p.add_argument("-v", "--verbose", action="store_true")
+    return p.parse_args()
+
+
+def main() -> int:
+    args = _parse_args()
+    logging.basicConfig(
+        level=logging.DEBUG if args.verbose else logging.INFO,
+        format="%(asctime)s %(levelname)s %(message)s",
+    )
+
+    if not args.dry_run and not os.environ.get("ANTHROPIC_API_KEY"):
+        print("error: ANTHROPIC_API_KEY env not set (use --dry-run to skip LLM call)",
+              file=sys.stderr)
+        return 2
+
+    cfg = ResearchConfig(
+        model=args.model,
+        max_web_search_uses=args.max_web_search_uses,
+        max_tokens=args.max_tokens,
+        wealthpilot_repo=args.wealthpilot_repo,
+        output_dir=args.output_dir,
+        only_company_ids=args.companies,
+        only_track_ids=args.tracks,
+        only_concern_ids=args.concerns,
+        keep_previous_unchanged=args.keep_previous,
+        dry_run=args.dry_run,
+    )
+
+    bundle = run_research(cfg)
+    print(f"generated {len(bundle['observations'])} observations  "
+          f"(agent={bundle['agent']['name']}, model={bundle['agent'].get('model','?')})")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
