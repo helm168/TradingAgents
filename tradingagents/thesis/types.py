@@ -129,7 +129,7 @@ class ResearchConfig:
     max_web_search_uses: int = 5
     """单 concern 最多调 web_search 几次. 太高费 token, 太低查不全."""
 
-    max_tokens: int = 4096
+    max_tokens: int = 8192
 
     # I/O 路径 — 都在共享数据根下, 跟 agent_reports 通路对称, 不感知 WealthPilot.
     knowledge_path: Optional[str] = None

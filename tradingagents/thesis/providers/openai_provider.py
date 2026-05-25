@@ -94,8 +94,10 @@ def research_concern(
             tools=[{"type": "web_search"}],
             max_tool_calls=cfg.max_web_search_uses,
             max_output_tokens=cfg.max_tokens,
-            # 强制 JSON 输出 — 比 Anthropic 这边的"靠 prompt 约束"更稳
-            # text={"format": {"type": "json_object"}},
+            # 注: 不能加 text={"format": "json_object"} — OpenAI Responses API
+            # 硬约束 built-in tools (web_search) 跟 structured outputs 互斥, 同时
+            # 给会 400 "Web Search cannot be used with JSON mode"
+            # (param=response_format). 靠 prompt 约束 + parse_json_response 兜底.
         )
     except Exception as e:
         logger.warning("openai call failed %s/%s: %s",
