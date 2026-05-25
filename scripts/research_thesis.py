@@ -2,17 +2,15 @@
 """调研 WealthPilot 投资逻辑卡里的关切点, 落盘 observations JSON.
 
 用法:
-    # 全量调研 (周频 cron 用)
-    python scripts/research_thesis.py
+    # 全量, 用 OpenAI (Responses API + web_search)
+    python scripts/research_thesis.py --provider openai --model gpt-4o
 
-    # 只跑 NVDA 一只票
-    python scripts/research_thesis.py --company fmp:NVDA
+    # 全量, 用 Anthropic (默认)
+    python scripts/research_thesis.py --provider anthropic --model claude-sonnet-4-5
 
-    # 只跑白酒赛道 (验证下行识别)
-    python scripts/research_thesis.py --track baijiu
-
-    # 只跑某个关切点 (例: 茅台批价)
-    python scripts/research_thesis.py --company cn:600519 --concern feitian-wholesale-price
+    # 单 concern, 跨 provider 对比 (跑两次, 不同 provider 各自落盘)
+    python scripts/research_thesis.py --provider openai   --company cn:600519 --concern feitian-wholesale-price
+    python scripts/research_thesis.py --provider anthropic --company cn:600519 --concern feitian-wholesale-price
 
     # Dry run (不调 LLM, 不落盘, 只打印 prompt 长度)
     python scripts/research_thesis.py --dry-run --company fmp:NVDA
@@ -21,13 +19,14 @@
     python scripts/research_thesis.py --company fmp:NVDA --keep-previous
 
 环境:
-    ANTHROPIC_API_KEY        必填, 走 raw anthropic SDK
+    OPENAI_API_KEY           OpenAI provider 必填
+    ANTHROPIC_API_KEY        Anthropic provider 必填
     SH_QUANT_DATA_DIR        可选, 共享数据根; 默认 ~/.market_data
 
 输入 / 输出 (都在共享数据根下, 跟 agent_reports 通路对称):
-    <data_dir>/thesis/knowledge.json              ← WealthPilot dev server 启动时 sync
-    <data_dir>/thesis/observations_<date>.json    ← 本次产出
-    <data_dir>/thesis/observations_latest.json    ← 指向最新 (WealthPilot middleware 读)
+    <data_dir>/thesis/knowledge.json                                   ← WealthPilot dev server 启动时 sync
+    <data_dir>/thesis/observations.<provider>-<model>.<date>.json      ← 本次产出
+    <data_dir>/thesis/observations.<provider>-<model>.latest.json      ← UI dropdown 切换
 
 PRD §4.2 / §8 — 调研失败/查不到 → unknown, 不编. evidence 强制带可点 URL.
 """
@@ -54,8 +53,11 @@ from tradingagents.thesis.types import ResearchConfig  # noqa: E402
 
 def _parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("--model", default="claude-sonnet-4-5",
-                   help="Anthropic model id (default: claude-sonnet-4-5)")
+    p.add_argument("--provider", default="anthropic",
+                   choices=["anthropic", "openai"],
+                   help="LLM provider (default: anthropic)")
+    p.add_argument("--model", default=None,
+                   help="model id (default: claude-sonnet-4-5 for anthropic, gpt-4o for openai)")
     p.add_argument("--max-web-search-uses", type=int, default=5,
                    help="单 concern 最多调几次 web_search (default: 5)")
     p.add_argument("--max-tokens", type=int, default=4096)
@@ -87,13 +89,20 @@ def main() -> int:
         format="%(asctime)s %(levelname)s %(message)s",
     )
 
-    if not args.dry_run and not os.environ.get("ANTHROPIC_API_KEY"):
-        print("error: ANTHROPIC_API_KEY env not set (use --dry-run to skip LLM call)",
+    # provider-specific default model
+    model = args.model
+    if model is None:
+        model = "gpt-4o" if args.provider == "openai" else "claude-sonnet-4-5"
+
+    required_key = {"anthropic": "ANTHROPIC_API_KEY", "openai": "OPENAI_API_KEY"}[args.provider]
+    if not args.dry_run and not os.environ.get(required_key):
+        print(f"error: {required_key} env not set (use --dry-run to skip LLM call)",
               file=sys.stderr)
         return 2
 
     cfg = ResearchConfig(
-        model=args.model,
+        provider=args.provider,
+        model=model,
         max_web_search_uses=args.max_web_search_uses,
         max_tokens=args.max_tokens,
         knowledge_path=args.knowledge_path,

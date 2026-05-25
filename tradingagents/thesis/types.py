@@ -118,8 +118,13 @@ class ResearchConfig:
     """单次调研 run 的参数."""
 
     # LLM
+    provider: str = "anthropic"
+    """LLM provider id: anthropic | openai. 决定走哪个 SDK + 用哪个 web_search
+    实现. 产物文件名按 provider+model 隔离, 多 provider 可并存."""
+
     model: str = "claude-sonnet-4-5"
-    """Anthropic model id. 走 raw anthropic SDK, 不经 langchain."""
+    """provider 对应的 model id (Anthropic: claude-sonnet-4-5;
+    OpenAI: gpt-4o / gpt-4o-mini / ...)."""
 
     max_web_search_uses: int = 5
     """单 concern 最多调 web_search 几次. 太高费 token, 太低查不全."""

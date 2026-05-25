@@ -1,29 +1,38 @@
-"""Runner — 遍历知识库 cards × concerns, 调研每个关切点, 落盘.
+"""Runner — 遍历 cards × concerns, 调研每个关切点, 落盘.
+
+多 LLM 并存
+─────────
+  文件按 provider+model 隔离:
+    ~/.market_data/thesis/
+      observations.anthropic-claude-sonnet-4-5.latest.json
+      observations.anthropic-claude-sonnet-4-5.2026-05-25.json
+      observations.openai-gpt-4o.latest.json
+      observations.openai-gpt-4o.2026-05-25.json
+
+  previousStatus 只在**同 provider+model** 内透传 — 不同模型口径 / temperature
+  导致的判级差异不该被算作"上次→本次变化".
+
+  WealthPilot middleware 启动时扫所有 observations.*.latest.json 文件,
+  UI dropdown 切换.
 
 流程:
-  1. 读 thesisKnowledge.json (跨 repo).
-  2. 读上次 observations_latest.json (如果存在), 索引 previousStatus.
-  3. 按 ResearchConfig 过滤范围 (only_company_ids / only_track_ids / only_concern_ids).
+  1. 读 ~/.market_data/thesis/knowledge.json.
+  2. 读本 provider+model 的上次 latest (如果有), 索引 previousStatus.
+  3. 按 cfg 过滤范围.
   4. 对每个 (card, concern) 调 research_concern → validate → 收集.
-  5. 写 observations_<date>.json + 软链 observations_latest.json (atomic).
-
-PRD §8.4: 调研失败 / 没查到 → unknown + 说明原因, **不沿用旧值冒充新值**.
-但 keep_previous_unchanged=True 时, 不在本次范围内的 observation 沿用上次值
-(部分重跑场景, 例: "只重刷 NVDA 一只票").
+  5. atomic 写 dated + latest 文件 (同 file_id 后缀).
 """
 from __future__ import annotations
 
 import json
 import logging
 import os
-import sys
 from datetime import date, datetime
 from pathlib import Path
 from typing import Dict, List, Optional
 
-import anthropic
-
 from .knowledge_loader import load_knowledge
+from .providers import file_id, make_client
 from .research_agent import research_concern
 from .types import (
     ConcernObservation,
@@ -48,8 +57,16 @@ def resolve_output_dir(cfg: ResearchConfig) -> Path:
     return Path.home() / ".market_data" / "thesis"
 
 
-def _load_previous_bundle(out_dir: Path) -> Optional[ObservationsBundle]:
-    latest = out_dir / "observations_latest.json"
+def latest_filename(cfg: ResearchConfig) -> str:
+    return f"observations.{file_id(cfg.provider, cfg.model)}.latest.json"
+
+
+def dated_filename(cfg: ResearchConfig, day: date) -> str:
+    return f"observations.{file_id(cfg.provider, cfg.model)}.{day.isoformat()}.json"
+
+
+def _load_previous_bundle(out_dir: Path, cfg: ResearchConfig) -> Optional[ObservationsBundle]:
+    latest = out_dir / latest_filename(cfg)
     if not latest.exists():
         return None
     try:
@@ -90,25 +107,11 @@ def _track_lookup(knowledge: ThesisKnowledge) -> Dict[str, ThesisTrack]:
 
 
 def _atomic_write_json(path: Path, data: dict) -> None:
-    """tmp file + rename — 避免半写产物被 middleware 读到."""
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(path.suffix + ".tmp")
     with tmp.open("w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
     tmp.replace(path)
-
-
-def _update_latest_pointer(out_dir: Path, dated_file: Path) -> None:
-    """observations_latest.json = 最新一份的副本 (不是 symlink — symlink 在
-    WSL / Windows / docker volume 上行为不一致, 直接拷贝最稳).
-
-    middleware 那边读 observations_latest.json 一个文件就行.
-    """
-    latest = out_dir / "observations_latest.json"
-    # 复制内容 (不是 hard link, 不是 symlink — 直接 read+write)
-    with dated_file.open("r", encoding="utf-8") as f:
-        data = json.load(f)
-    _atomic_write_json(latest, data)
 
 
 def _build_bundle(
@@ -118,28 +121,31 @@ def _build_bundle(
     return {
         "generatedAt": datetime.now().astimezone().isoformat(timespec="seconds"),
         "asOfNote": f"{today.year} 年 {today.month} 月 第 {((today.day - 1) // 7) + 1} 周",
-        "agent": {"name": "thesis-research-agent", "model": cfg.model},
+        "agent": {
+            "name": "thesis-research-agent",
+            "model": cfg.model,
+            "provider": cfg.provider,
+        },
         "observations": observations,
     }
 
 
 def run_research(cfg: ResearchConfig) -> ObservationsBundle:
-    """主入口. 返回写出的 ObservationsBundle (即便 dry_run 也返回组装好的形态,
-    便于上层 CLI 自检)."""
+    """主入口. 返回组装好的 ObservationsBundle (dry_run 也返回, 便于自检)."""
     knowledge = load_knowledge(cfg)
     out_dir = resolve_output_dir(cfg)
 
-    previous_bundle = _load_previous_bundle(out_dir)
+    previous_bundle = _load_previous_bundle(out_dir, cfg)
     previous_idx = _index_previous(previous_bundle)
     tracks_by_id = _track_lookup(knowledge)
     cards = _select_cards(knowledge, cfg)
 
     logger.info(
-        "thesis research: %d cards selected; model=%s; dry_run=%s",
-        len(cards), cfg.model, cfg.dry_run,
+        "thesis research: provider=%s model=%s; %d cards selected; dry_run=%s",
+        cfg.provider, cfg.model, len(cards), cfg.dry_run,
     )
 
-    client: Optional[anthropic.Anthropic] = None if cfg.dry_run else anthropic.Anthropic()
+    client = None if cfg.dry_run else make_client(cfg.provider)
 
     fresh_observations: List[ConcernObservation] = []
     covered_keys: set[str] = set()
@@ -167,7 +173,6 @@ def run_research(cfg: ResearchConfig) -> ObservationsBundle:
                 logger.warning("    coerced to unknown: %s", validated.get("detail", ""))
             fresh_observations.append(validated)
 
-    # 部分重跑场景: 沿用上次 latest 里不在本次范围的 observation
     if cfg.keep_previous_unchanged and previous_bundle:
         carried = 0
         for key, prev_obs in previous_idx.items():
@@ -189,8 +194,9 @@ def run_research(cfg: ResearchConfig) -> ObservationsBundle:
         return bundle
 
     out_dir.mkdir(parents=True, exist_ok=True)
-    dated = out_dir / f"observations_{date.today().isoformat()}.json"
-    _atomic_write_json(dated, bundle)  # type: ignore[arg-type]
-    _update_latest_pointer(out_dir, dated)
-    logger.info("wrote %s + observations_latest.json", dated.name)
+    dated_path = out_dir / dated_filename(cfg, date.today())
+    latest_path = out_dir / latest_filename(cfg)
+    _atomic_write_json(dated_path, bundle)  # type: ignore[arg-type]
+    _atomic_write_json(latest_path, bundle)  # type: ignore[arg-type]
+    logger.info("wrote %s + %s", dated_path.name, latest_path.name)
     return bundle
