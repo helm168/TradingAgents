@@ -95,7 +95,7 @@ def research_concern(
             max_tool_calls=cfg.max_web_search_uses,
             max_output_tokens=cfg.max_tokens,
             # 强制 JSON 输出 — 比 Anthropic 这边的"靠 prompt 约束"更稳
-            text={"format": {"type": "json_object"}},
+            # text={"format": {"type": "json_object"}},
         )
     except Exception as e:
         logger.warning("openai call failed %s/%s: %s",
