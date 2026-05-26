@@ -27,7 +27,8 @@ from ..types import (
     ConcernDefinition,
     ConcernObservation,
     HealthStatus,
-    ThesisCard,
+    Player,
+    Segment,
     ThesisTrack,
 )
 
@@ -85,24 +86,40 @@ def reload_prompts() -> None:
 
 
 def build_user_prompt(
-    card: ThesisCard,
+    segment: Segment,
     track: Optional[ThesisTrack],
     concern: ConcernDefinition,
+    player: Optional[Player],
     previous_status: Optional[HealthStatus],
 ) -> str:
-    thesis = card["thesis"]
-    track_label = track["label"] if track else thesis.get("track", "")
+    """统一 prompt builder. player=None 时是环节级调研 (景气信号), 否则是
+    Player 公司级 (份额 / 卡位)."""
+    track_label = track["label"] if track else segment.get("track", "")
     hint = concern["researchHint"]
     rubric = concern["rubric"]
     prev_line = (
         f"上次调研判级: {previous_status}" if previous_status else "上次调研判级: 无 (首次)"
     )
+
+    if player is None:
+        scope_block = (
+            f"赛道: {track_label}\n"
+            f"环节: {segment.get('label', '')}\n"
+            f"环节描述: {segment.get('summary', '')}\n"
+            f"(这是**环节级景气信号**, 跨环节里所有公司共享, 不针对单一公司.)"
+        )
+    else:
+        scope_block = (
+            f"赛道: {track_label}\n"
+            f"环节: {segment.get('label', '')}\n"
+            f"环节描述: {segment.get('summary', '')}\n"
+            f"公司: {player.get('displayName', '')} ({player.get('companyId', '')})\n"
+            f"该公司在本环节的卡位: {player.get('positioning', '')}\n"
+            f"(这是**公司在本环节内的特定指标**, 不是全行业景气, 聚焦该公司层面.)"
+        )
+
     return _USER_PROMPT_TEMPLATE.format(
-        display_name=card["displayName"],
-        company_id=card["companyId"],
-        track_label=track_label,
-        node=thesis.get("node", ""),
-        summary=thesis.get("summary", ""),
+        scope_block=scope_block,
         concern_label=concern["label"],
         why=concern["why"],
         rubric_bullish=rubric["bullish"],
@@ -147,13 +164,11 @@ def parse_json_response(text: str) -> dict:
 
 
 def empty_observation(
-    card: ThesisCard,
     concern: ConcernDefinition,
     previous_status: Optional[HealthStatus],
 ) -> ConcernObservation:
-    """构造一个 unknown skeleton, provider 拿到 LLM 输出后往里填."""
+    """构造一个 unknown skeleton (扁平 concernId 键). v2 不再带 companyId."""
     obs: ConcernObservation = {
-        "companyId": card["companyId"],
         "concernId": concern["id"],
         "status": "unknown",
         "trend": "unknown",
@@ -172,7 +187,7 @@ def empty_observation(
 def merge_parsed_into_skeleton(
     skeleton: ConcernObservation, parsed: dict
 ) -> ConcernObservation:
-    """把 LLM 返回的字段 merge 进 skeleton, 保留 companyId/concernId/researchedAt."""
+    """把 LLM 返回的字段 merge 进 skeleton, 保留 concernId/researchedAt."""
     out: ConcernObservation = dict(skeleton)  # type: ignore[assignment]
     for key in (
         "status", "trend", "headline", "detail", "metrics", "evidence", "confidence",

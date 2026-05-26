@@ -32,7 +32,6 @@ def _coerce_unknown(obs: ConcernObservation, reason: str) -> ConcernObservation:
     """把 observation 改成 unknown 形态 + 把 reason 塞到 detail 里, 让用户
     一眼能看出"为啥是 unknown"."""
     return {
-        "companyId": obs.get("companyId", ""),
         "concernId": obs.get("concernId", ""),
         "status": "unknown",
         "trend": "unknown",

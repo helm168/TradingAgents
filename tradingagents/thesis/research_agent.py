@@ -1,8 +1,7 @@
-"""Backwards-compat shim — 老 caller 直接 import research_concern. 真正逻辑
-按 cfg.provider 分发到 providers/<provider>.py.
+"""Backwards-compat shim — 按 cfg.provider 分发到 providers/<provider>.py.
 
-新代码应直接走 providers.get_research_fn(provider). 这里只保留一个 thin
-wrapper, 让 runner 不需要每次 switch provider.
+v2 签名: (segment, track, concern, player, prev_status, cfg, client).
+player=None → 环节级调研 (景气信号); 否则 → Player 公司级 (份额 / 卡位).
 """
 from __future__ import annotations
 
@@ -13,21 +12,21 @@ from .types import (
     ConcernDefinition,
     ConcernObservation,
     HealthStatus,
+    Player,
     ResearchConfig,
-    ThesisCard,
+    Segment,
     ThesisTrack,
 )
 
 
 def research_concern(
-    card: ThesisCard,
+    segment: Segment,
     track: Optional[ThesisTrack],
     concern: ConcernDefinition,
+    player: Optional[Player],
     previous_status: Optional[HealthStatus],
     cfg: ResearchConfig,
     client: object = None,
 ) -> ConcernObservation:
-    """按 cfg.provider 分发. client 由 runner 提前造好传进来 (避免每个 concern
-    都新建 SDK client)."""
     fn = get_research_fn(cfg.provider)
-    return fn(card, track, concern, previous_status, cfg, client)
+    return fn(segment, track, concern, player, previous_status, cfg, client)

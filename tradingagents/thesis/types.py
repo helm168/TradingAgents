@@ -1,7 +1,7 @@
-"""Python 端 thesis 类型 — 镜像 WealthPilot src/features/thesis/types.ts.
+"""Python 端 thesis 类型 (v2) — 镜像 WealthPilot src/features/thesis/types.ts.
 
-用 TypedDict / 普通 dataclass 而不是 pydantic, 减少依赖, 同时跟 JSON I/O 对齐.
-schema drift 时 runtime 报错好定位.
+实体倒置: 主体是 Segment (环节), 公司降为 Player (卡位玩家).
+observation 用扁平单键 concernId (全局唯一).
 """
 from __future__ import annotations
 
@@ -32,6 +32,8 @@ class ResearchHint(TypedDict):
 
 
 class ConcernDefinition(TypedDict):
+    """**全局唯一** id (跨 segment / player). Observation 用 id 单键对账."""
+
     id: str
     label: str
     why: str
@@ -39,26 +41,26 @@ class ConcernDefinition(TypedDict):
     researchHint: ResearchHint
 
 
-class ThesisDescriptor(TypedDict, total=False):
-    track: str
-    node: str
-    scarcity: ScarcityTier
-    localization: LocalizationStage  # optional
-    summary: str
+class Player(TypedDict, total=False):
+    """公司在某环节里的卡位."""
 
-
-class ThesisCardMeta(TypedDict):
-    author: str
-    createdAt: str
-    reviewedAt: str
-
-
-class ThesisCard(TypedDict):
     companyId: str
     displayName: str
-    thesis: ThesisDescriptor
+    positioning: str
+    scarcity: ScarcityTier  # optional, fallback Segment.scarcity
     concerns: List[ConcernDefinition]
-    meta: ThesisCardMeta
+    referenceOnly: bool  # 行业格局参考玩家 (港台日韩), 不调研
+
+
+class Segment(TypedDict, total=False):
+    id: str
+    track: str
+    label: str
+    summary: str
+    scarcity: ScarcityTier
+    localization: LocalizationStage  # 仅 chokepoint 赛道
+    concerns: List[ConcernDefinition]  # 环节级 (景气信号)
+    players: List[Player]
 
 
 class ThesisTrack(TypedDict):
@@ -71,10 +73,10 @@ class ThesisTrack(TypedDict):
 class ThesisKnowledge(TypedDict):
     version: int
     tracks: List[ThesisTrack]
-    cards: List[ThesisCard]
+    segments: List[Segment]
 
 
-# ── 动态层 mirrors src/features/thesis/types.ts ConcernObservation ──
+# ── 动态层 mirrors src/features/thesis/types.ts ─────────────────────
 
 
 class ObservationEvidence(TypedDict):
@@ -85,7 +87,8 @@ class ObservationEvidence(TypedDict):
 
 
 class ConcernObservation(TypedDict, total=False):
-    companyId: str
+    """扁平单键 concernId, 无 companyId (v2 实体倒置后不再需要复合键)."""
+
     concernId: str
     status: HealthStatus
     trend: TrendDirection
@@ -101,16 +104,18 @@ class ConcernObservation(TypedDict, total=False):
 class AgentMeta(TypedDict, total=False):
     name: str
     model: str
+    provider: str
 
 
-class ObservationsBundle(TypedDict):
+class ObservationsBundle(TypedDict, total=False):
     generatedAt: str
     asOfNote: str
     agent: AgentMeta
+    gatedSegmentIds: List[str]  # PRD §5.2: 因环节下行未调研的环节
     observations: List[ConcernObservation]
 
 
-# ── Runner config (Python-side, 不出现在产出 JSON 里) ───────────────
+# ── Runner config ───────────────────────────────────────────────────
 
 
 @dataclass
@@ -119,42 +124,30 @@ class ResearchConfig:
 
     # LLM
     provider: str = "anthropic"
-    """LLM provider id: anthropic | openai. 决定走哪个 SDK + 用哪个 web_search
-    实现. 产物文件名按 provider+model 隔离, 多 provider 可并存."""
-
     model: str = "claude-sonnet-4-5"
-    """provider 对应的 model id (Anthropic: claude-sonnet-4-5;
-    OpenAI: gpt-4o / gpt-4o-mini / ...)."""
 
     max_web_search_uses: int = 5
-    """单 concern 最多调 web_search 几次. 太高费 token, 太低查不全."""
-
     max_tokens: int = 8192
 
-    # I/O 路径 — 都在共享数据根下, 跟 agent_reports 通路对称, 不感知 WealthPilot.
+    # I/O 路径
     knowledge_path: Optional[str] = None
-    """knowledge.json 路径. None → $SH_QUANT_DATA_DIR/thesis/knowledge.json 或
-    ~/.market_data/thesis/knowledge.json. 真源是 WealthPilot dev server
-    启动时 sync 过来的 (vite middleware 干的)."""
-
     output_dir: Optional[str] = None
-    """observations_*.json 输出目录. None → $SH_QUANT_DATA_DIR/thesis 或
-    ~/.market_data/thesis/."""
 
     # 范围过滤
     only_company_ids: Optional[List[str]] = None
-    """只跑指定 companyId 列表 (手动触发用); None → 全跑."""
+    """只跑指定 companyId 列表 (匹配 Player.companyId)."""
+
+    only_segment_ids: Optional[List[str]] = None
+    """只跑指定 segment id 列表."""
 
     only_track_ids: Optional[List[str]] = None
-    """只跑指定 track 下的卡; None → 全跑."""
-
     only_concern_ids: Optional[List[str]] = None
-    """卡内 concern id 白名单 (跟 only_company_ids 组合); None → 全跑."""
 
     # 行为
     dry_run: bool = False
-    """True → 只打印 prompt 不调 LLM, 也不落盘. 调研逻辑 review 用."""
-
     keep_previous_unchanged: bool = False
-    """True → 没在本次范围内的 observation 沿用上次 latest.json 里的值
-    (部分重跑). False (默认) → 不在范围内的丢掉. PRD §8.1 手动触发场景."""
+
+    # 门控 (v2)
+    enable_gating: bool = True
+    """True (默认) → 阶段二门控: bearish 环节跳过 Player concerns.
+    False → 不门控 (调试用)."""

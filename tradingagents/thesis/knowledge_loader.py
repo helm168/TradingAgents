@@ -51,8 +51,8 @@ def load_knowledge(cfg: Optional[ResearchConfig] = None) -> ThesisKnowledge:
     with path.open("r", encoding="utf-8") as f:
         data = json.load(f)
 
-    if "cards" not in data or "tracks" not in data:
+    if "segments" not in data or "tracks" not in data:
         raise ValueError(
-            f"knowledge.json shape unexpected — missing 'cards' or 'tracks': {path}"
+            f"knowledge.json shape unexpected — missing 'segments' or 'tracks' (v2): {path}"
         )
     return data  # type: ignore[return-value]

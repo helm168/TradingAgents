@@ -67,13 +67,18 @@ def _parse_args() -> argparse.Namespace:
                    help="observations 输出目录 (默认 $SH_QUANT_DATA_DIR/thesis 或 ~/.market_data/thesis)")
     p.add_argument("--company", action="append", default=None, dest="companies",
                    metavar="COMPANY_ID",
-                   help="只跑这些 companyId (例 fmp:NVDA, 可重复)")
+                   help="只跑含这些 companyId 的 segment 里的 Player (例 fmp:NVDA, 可重复)")
+    p.add_argument("--segment", action="append", default=None, dest="segments",
+                   metavar="SEGMENT_ID",
+                   help="只跑这些 segment id (例 hbm-memory / baijiu-premium, 可重复)")
     p.add_argument("--track", action="append", default=None, dest="tracks",
                    metavar="TRACK_ID",
                    help="只跑这些赛道 (例 ai-compute / baijiu / upstream-chokepoint, 可重复)")
     p.add_argument("--concern", action="append", default=None, dest="concerns",
                    metavar="CONCERN_ID",
                    help="只跑这些 concernId (例 feitian-wholesale-price, 可重复)")
+    p.add_argument("--no-gating", action="store_true",
+                   help="禁用阶段二门控 (默认 bearish 环节跳过 Player; 调试 / 历史回填用)")
     p.add_argument("--keep-previous", action="store_true",
                    help="不在本次范围内的 observation 沿用上次 latest.json (默认丢掉)")
     p.add_argument("--dry-run", action="store_true",
@@ -101,10 +106,20 @@ def _do_print_prompts() -> int:
     print("USER PROMPT (示例: 知识库里第一张卡的第一个关切点)")
     print("─" * 60)
     knowledge = load_knowledge(ResearchConfig())
-    card = knowledge["cards"][0]
-    track = next((t for t in knowledge["tracks"] if t["id"] == card["thesis"].get("track")), None)
-    concern = card["concerns"][0]
-    print(build_user_prompt(card, track, concern, None))
+    segment = knowledge["segments"][0]
+    track = next((t for t in knowledge["tracks"] if t["id"] == segment.get("track")), None)
+    # 优先示例环节级 concern; 没有就示例第一个 Player 的公司级 concern
+    if segment.get("concerns"):
+        concern = segment["concerns"][0]
+        print(build_user_prompt(segment, track, concern, None, None))
+    else:
+        players = [p for p in segment.get("players", []) if not p.get("referenceOnly")]
+        if players and players[0].get("concerns"):
+            player = players[0]
+            concern = player["concerns"][0]
+            print(build_user_prompt(segment, track, concern, player, None))
+        else:
+            print("(知识库第一个 segment 没有 concern 可示例)")
     return 0
 
 
@@ -137,8 +152,10 @@ def main() -> int:
         knowledge_path=args.knowledge_path,
         output_dir=args.output_dir,
         only_company_ids=args.companies,
+        only_segment_ids=args.segments,
         only_track_ids=args.tracks,
         only_concern_ids=args.concerns,
+        enable_gating=not args.no_gating,
         keep_previous_unchanged=args.keep_previous,
         dry_run=args.dry_run,
     )

@@ -10,8 +10,9 @@ from ..types import (
     ConcernDefinition,
     ConcernObservation,
     HealthStatus,
+    Player,
     ResearchConfig,
-    ThesisCard,
+    Segment,
     ThesisTrack,
 )
 from ._common import (
@@ -35,21 +36,24 @@ def _extract_text(message: anthropic.types.Message) -> str:
 
 
 def research_concern(
-    card: ThesisCard,
+    segment: Segment,
     track: Optional[ThesisTrack],
     concern: ConcernDefinition,
+    player: Optional[Player],
     previous_status: Optional[HealthStatus],
     cfg: ResearchConfig,
     client: Optional[anthropic.Anthropic] = None,
 ) -> ConcernObservation:
-    user_prompt = build_user_prompt(card, track, concern, previous_status)
-    obs = empty_observation(card, concern, previous_status)
+    user_prompt = build_user_prompt(segment, track, concern, player, previous_status)
+    obs = empty_observation(concern, previous_status)
 
     if cfg.dry_run:
-        logger.info(
-            "[dry-run anthropic] %s/%s — %d chars",
-            card["companyId"], concern["id"], len(user_prompt),
+        scope = (
+            f"{segment.get('id', '?')}/{concern['id']}"
+            if player is None
+            else f"{segment.get('id', '?')}::{player.get('companyId', '?')}/{concern['id']}"
         )
+        logger.info("[dry-run anthropic] %s — %d chars", scope, len(user_prompt))
         obs["detail"] = "[dry-run] LLM not called"
         return obs
 
@@ -68,7 +72,7 @@ def research_concern(
         )
     except Exception as e:
         logger.warning("anthropic call failed %s/%s: %s",
-                       card["companyId"], concern["id"], e)
+                       segment.get("id", "?"), concern["id"], e)
         obs["detail"] = f"[降级为 unknown] LLM 调用失败: {e}"
         return obs
 
@@ -77,7 +81,7 @@ def research_concern(
         parsed = parse_json_response(text)
     except ValueError as e:
         logger.warning("anthropic JSON parse failed %s/%s: %s",
-                       card["companyId"], concern["id"], e)
+                       segment.get("id", "?"), concern["id"], e)
         obs["detail"] = f"[降级为 unknown] LLM 返回非 JSON: {e}"
         return obs
 
