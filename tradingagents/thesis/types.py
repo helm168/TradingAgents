@@ -31,14 +31,19 @@ class ResearchHint(TypedDict):
     expectedShape: str
 
 
-class ConcernDefinition(TypedDict):
-    """**全局唯一** id (跨 segment / player). Observation 用 id 单键对账."""
+class ConcernDefinition(TypedDict, total=False):
+    """**全局唯一** id (跨 segment / player). Observation 用 id 单键对账.
+
+    cacheTtlDays optional —— 复用上次调研结果的天数. 默认 7.
+    高频指标 (批价 / 政策事件) 调小到 3, 低频 (财报 / 认证) 调大到 30.
+    """
 
     id: str
     label: str
     why: str
     rubric: ConcernRubric
     researchHint: ResearchHint
+    cacheTtlDays: int
 
 
 class Player(TypedDict, total=False):
@@ -151,3 +156,15 @@ class ResearchConfig:
     enable_gating: bool = True
     """True (默认) → 阶段二门控: bearish 环节跳过 Player concerns.
     False → 不门控 (调试用)."""
+
+    # Cache (v2)
+    default_cache_ttl_days: int = 7
+    """默认 cache TTL. 单 concern 可在 knowledge.json 用 cacheTtlDays override.
+    主要省"手动重跑 / cron 后短期内重复 LLM 调用". 周频 cron 跑时 cache 多半
+    过期, 不影响."""
+
+    max_age_days_override: Optional[int] = None
+    """CLI --max-age-days N. 临时覆盖所有 concern (含 cacheTtlDays override). """
+
+    force_refresh: bool = False
+    """CLI --force. 完全忽略 cache, 全部重跑 LLM."""

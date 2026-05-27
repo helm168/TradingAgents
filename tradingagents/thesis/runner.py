@@ -151,6 +151,51 @@ def _prev_status(
     return None
 
 
+def _effective_ttl_days(concern: dict, cfg: ResearchConfig) -> int:
+    """CLI override > concern 配置 > 默认 7."""
+    if cfg.max_age_days_override is not None:
+        return cfg.max_age_days_override
+    ttl = concern.get("cacheTtlDays")
+    if isinstance(ttl, int) and ttl > 0:
+        return ttl
+    return cfg.default_cache_ttl_days
+
+
+def _try_cache_hit(
+    concern: dict,
+    previous_idx: Dict[str, ConcernObservation],
+    cfg: ResearchConfig,
+    today: date,
+) -> Optional[tuple[ConcernObservation, int]]:
+    """Cache 命中检查. 返回 (observation, age_days) 命中, None 未命中.
+
+    命中条件 (全部满足):
+      1. cfg.force_refresh = False
+      2. previous_idx 里有该 concernId
+      3. researchedAt 解析合法 (YYYY-MM-DD)
+      4. today - researchedAt 在 [0, ttl] 之间
+    """
+    if cfg.force_refresh:
+        return None
+    prev = previous_idx.get(concern["id"])
+    if not prev:
+        return None
+    researched_at = prev.get("researchedAt", "")
+    try:
+        prev_date = date.fromisoformat(researched_at)
+    except (ValueError, TypeError):
+        return None
+    age_days = (today - prev_date).days
+    if age_days < 0:
+        return None  # researchedAt 在未来 → 数据坏了, 重跑
+    ttl = _effective_ttl_days(concern, cfg)
+    # 语义: ttl=N 表示"≥ N 天就刷新", 等价"< N 天才用 cache".
+    # 这样 --max-age-days 0 = 任何数据都刷新 (跟 --force 等价).
+    if age_days >= ttl:
+        return None
+    return prev, age_days
+
+
 def _research_one(
     segment: Segment,
     track: Optional[ThesisTrack],
@@ -194,6 +239,8 @@ def run_research(cfg: ResearchConfig) -> ObservationsBundle:
     gated_segment_ids: List[str] = []
     covered_concern_ids: set[str] = set()
     coerced = 0
+    cache_hits = 0
+    today = date.today()
 
     # ── 阶段一: 环节级 concerns → 算 segment health ──────────────────
     segment_health: Dict[str, HealthStatus] = {}
@@ -205,6 +252,18 @@ def run_research(cfg: ResearchConfig) -> ObservationsBundle:
             if cfg.only_concern_ids and concern["id"] not in cfg.only_concern_ids:
                 continue
             covered_concern_ids.add(concern["id"])
+            cached = _try_cache_hit(concern, previous_idx, cfg, today)
+            if cached:
+                obs, age = cached
+                logger.info(
+                    "  [cached %dd] %s/%s (ttl=%dd)",
+                    age, segment.get("id"), concern["id"],
+                    _effective_ttl_days(concern, cfg),
+                )
+                env_obs.append(obs)
+                fresh_observations.append(obs)
+                cache_hits += 1
+                continue
             validated, was_coerced = _research_one(
                 segment, track, concern, None, previous_idx, cfg, client,
             )
@@ -236,6 +295,17 @@ def run_research(cfg: ResearchConfig) -> ObservationsBundle:
                 if cfg.only_concern_ids and concern["id"] not in cfg.only_concern_ids:
                     continue
                 covered_concern_ids.add(concern["id"])
+                cached = _try_cache_hit(concern, previous_idx, cfg, today)
+                if cached:
+                    obs, age = cached
+                    logger.info(
+                        "  [cached %dd] %s::%s/%s (ttl=%dd)",
+                        age, segment.get("id"), player.get("companyId"),
+                        concern["id"], _effective_ttl_days(concern, cfg),
+                    )
+                    fresh_observations.append(obs)
+                    cache_hits += 1
+                    continue
                 validated, was_coerced = _research_one(
                     segment, track, concern, player, previous_idx, cfg, client,
                 )
@@ -258,9 +328,12 @@ def run_research(cfg: ResearchConfig) -> ObservationsBundle:
             logger.info("carried %d unchanged observations from previous bundle", carried)
 
     bundle = _build_bundle(fresh_observations, gated_segment_ids, cfg)
+    fresh_calls = len(fresh_observations) - cache_hits
     logger.info(
-        "done: %d observations, %d gated segments (%d coerced to unknown)",
-        len(fresh_observations), len(gated_segment_ids), coerced,
+        "done: %d observations (%d from LLM, %d from cache); "
+        "%d gated segments; %d coerced to unknown",
+        len(fresh_observations), fresh_calls, cache_hits,
+        len(gated_segment_ids), coerced,
     )
 
     if cfg.dry_run:

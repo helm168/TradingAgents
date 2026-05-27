@@ -79,6 +79,11 @@ def _parse_args() -> argparse.Namespace:
                    help="只跑这些 concernId (例 feitian-wholesale-price, 可重复)")
     p.add_argument("--no-gating", action="store_true",
                    help="禁用阶段二门控 (默认 bearish 环节跳过 Player; 调试 / 历史回填用)")
+    p.add_argument("--max-age-days", type=int, default=None, metavar="N",
+                   help="临时 cache TTL 上限 (天). 覆盖所有 concern. "
+                        "默认走 knowledge.json 各 concern 的 cacheTtlDays (3/7/30).")
+    p.add_argument("--force", action="store_true",
+                   help="完全忽略 cache, 全部重跑 LLM (常用于 prompt 改完想全量 rerun)")
     p.add_argument("--keep-previous", action="store_true",
                    help="不在本次范围内的 observation 沿用上次 latest.json (默认丢掉)")
     p.add_argument("--dry-run", action="store_true",
@@ -156,6 +161,8 @@ def main() -> int:
         only_track_ids=args.tracks,
         only_concern_ids=args.concerns,
         enable_gating=not args.no_gating,
+        max_age_days_override=args.max_age_days,
+        force_refresh=args.force,
         keep_previous_unchanged=args.keep_previous,
         dry_run=args.dry_run,
     )
