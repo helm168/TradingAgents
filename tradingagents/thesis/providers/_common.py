@@ -91,10 +91,28 @@ def build_user_prompt(
     concern: ConcernDefinition,
     player: Optional[Player],
     previous_status: Optional[HealthStatus],
+    signals_block: Optional[str] = None,
 ) -> str:
     """统一 prompt builder. player=None 时是环节级调研 (景气信号), 否则是
-    Player 公司级 (份额 / 卡位)."""
+    Player 公司级 (份额 / 卡位).
+
+    signals_block: sh_quant ingest 的公开源 tier-grouped evidence (PRD §5.3).
+    None 时自动按 segment.id 从 ~/.market_data/industry_news/ 加载 (有 parquet
+    就用, 没有就空 — 公开源是增强不是必需). 传 "" 强制不加载.
+    """
     track_label = track["label"] if track else segment.get("track", "")
+
+    if signals_block is None:
+        # 自动加载该 segment 的 ingested signals (公开源增强). 任何异常都吞掉,
+        # 退化为纯 web_search — ingest 通路坏不该挂掉调研.
+        try:
+            from ..signals import load_signals_for_segment, render_signals_block
+
+            sigs = load_signals_for_segment(segment.get("id", ""))
+            signals_block = render_signals_block(sigs)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("load signals failed for %s: %s", segment.get("id"), e)
+            signals_block = ""
     hint = concern["researchHint"]
     rubric = concern["rubric"]
     prev_line = (
@@ -120,6 +138,8 @@ def build_user_prompt(
 
     return _USER_PROMPT_TEMPLATE.format(
         scope_block=scope_block,
+        signals_block=signals_block
+        or "(无 sh_quant ingest 的公开源 signal; 完全依赖 web_search, 仍按 tier 打标)",
         concern_label=concern["label"],
         why=concern["why"],
         rubric_bullish=rubric["bullish"],

@@ -15,8 +15,12 @@
 优先采信源 (按顺序): {hint_sources}
 期望数据形态: {hint_shape}
 
+# 已 ingest 的公开源 signal (tier 分组, 优先采信)
+{signals_block}
+
 # 上下文
 {prev_line}
 今天日期: {today}
 
-请用 web_search 工具检索最新数据, 然后输出 JSON.
+请结合上面已 ingest 的 signal + web_search 检索最新数据, 然后输出 JSON.
+每条 evidence 必须按系统规则打 tier; 已 ingest signal 的 tier 已给出, 直接沿用.
