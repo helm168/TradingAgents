@@ -84,11 +84,26 @@ class ThesisKnowledge(TypedDict):
 # ── 动态层 mirrors src/features/thesis/types.ts ─────────────────────
 
 
-class ObservationEvidence(TypedDict):
+SourceTier = Literal["T1", "T2", "T3", "T4", "T5", "T6", "T7"]
+
+
+class ObservationEvidence(TypedDict, total=False):
     source: str
     url: str
     quote: str
     publishedAt: str
+    # v2 PRD §5.2: tier-aware evidence
+    tier: SourceTier
+    cited_source: str  # T2 必填, 上游真正发数据的源名
+    original_source: str  # T2 引用的数字真正源头
+
+
+class DataGap(TypedDict):
+    """concern 数据缺口 — 让用户决定要不要按需购买. PRD §5.6."""
+
+    missing: str
+    why_matter: str
+    suggested_source: str
 
 
 class ConcernObservation(TypedDict, total=False):
@@ -104,6 +119,8 @@ class ConcernObservation(TypedDict, total=False):
     confidence: Confidence
     previousStatus: HealthStatus  # optional
     researchedAt: str
+    # v2 PRD §5.6: agent 标的数据缺口, App 端展示"建议按需购买"
+    data_gaps: List[DataGap]
 
 
 class AgentMeta(TypedDict, total=False):
